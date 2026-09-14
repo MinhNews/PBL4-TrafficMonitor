@@ -1,0 +1,37 @@
+# ==========================================
+# 1. DATABASE MYSQL
+# ==========================================
+spring.datasource.url=jdbc:mysql://localhost:3306/traffic_db?useSSL=false&serverTimezone=Asia/Ho_Chi_Minh&characterEncoding=UTF-8&createDatabaseIfNotExist=true
+spring.datasource.username=root
+# 👉 LƯU Ý: Đổi mật khẩu bên dưới thành mật khẩu MySQL root trên máy bạn
+spring.datasource.password=matkhau_cua_ban
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+# ==========================================
+# 2. JPA / HIBERNATE (Tự động cập nhật bảng)
+# ==========================================
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+
+# ==========================================
+# 3. SERVER & UPLOAD FILE BẰNG CHỨNG
+# ==========================================
+server.port=8080
+app.upload.dir=./uploads/evidence
+spring.servlet.multipart.max-file-size=10MB
+spring.servlet.multipart.max-request-size=10MB
+
+# ==========================================
+# 4. MQTT (KẾT NỐI ESP32)
+# ==========================================
+mqtt.broker.url=tcp://localhost:1883
+mqtt.client.id=spring-backend-01
+mqtt.topic.alert=traffic/alert
+mqtt.topic.light=traffic/light
+
+# ==========================================
+# 5. JWT SECURITY
+# ==========================================
+app.jwt.secret=pbl4-nhom3-secret-key-2026-traffic-monitor-jwt-token-secure
+app.jwt.expiration=86400000
