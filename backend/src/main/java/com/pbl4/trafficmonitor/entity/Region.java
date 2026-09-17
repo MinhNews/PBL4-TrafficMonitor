@@ -28,10 +28,8 @@ public class Region {
     @Column(length = 100)
     private String district;
 
-    @Column(precision = 10, scale = 8)
     private Double latitude;     // Tọa độ vĩ độ (dùng để ghim lên bản đồ)
 
-    @Column(precision = 11, scale = 8)
     private Double longitude;    // Tọa độ kinh độ
 
     @Column(name = "created_at")

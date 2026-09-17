@@ -31,7 +31,6 @@ public class Violation {
     @Column(name = "vehicle_type", length = 30)
     private VehicleType vehicleType;
 
-    @Column(precision = 5, scale = 4)
     private Double confidence;   // Độ tin cậy AI (VD: 0.9520)
 
     // Trạng thái: PENDING (chờ duyệt), CONFIRMED (đã phạt), DISMISSED (bác bỏ)
