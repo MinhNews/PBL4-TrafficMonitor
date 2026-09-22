@@ -1,76 +1,97 @@
 import React, { useState, useEffect } from 'react';
-import StatCard from '../components/dashboard/StatCard';
-import LiveCamera from '../components/dashboard/LiveCamera';
+import { connectWebSocket } from '../services/socket';
+import HourlyChart from '../components/dashboard/HourlyChart';
 import ViolationTable from '../components/dashboard/ViolationTable';
 import ViolationModal from '../components/violations/ViolationModal';
-import { statsAPI, violationAPI } from '../services/api';
 
 export default function Dashboard() {
-    const [stats, setStats] = useState({ totalViolations: 0, noHelmetCount: 0, redLightCount: 0, vehiclesPassedToday: 0 });
-    const [violations, setViolations] = useState([]);
-    const [selectedViolation, setSelectedViolation] = useState(null);
+  const [violations, setViolations] = useState([]);
+  const [selectedViolation, setSelectedViolation] = useState(null);
+  
+  // State khởi tạo 24 khung giờ trong ngày cho Recharts
+  const [hourlyData, setHourlyData] = useState(
+    Array.from({ length: 24 }, (_, i) => ({ label: `${i}h`, count: 0 }))
+  );
 
-    useEffect(() => {
-        loadData();
-        const interval = setInterval(loadData, 15000); // Tự động làm mới sau mỗi 15 giây
-        return () => clearInterval(interval);
-    }, []);
+  const [stats, setStats] = useState({
+    totalViolations: 0,
+    redLightCount: 0,
+    noHelmetCount: 0
+  });
 
-    async function loadData() {
-        try {
-            const [statsRes, violationsRes] = await Promise.all([
-                statsAPI.getToday(),
-                violationAPI.getAll({ page: 0, size: 10 }),
-            ]);
-            setStats(statsRes.data);
-            setViolations(violationsRes.data.content);
-        } catch (err) {
-            console.error('Lỗi nạp dữ liệu từ Backend:', err);
-        }
-    }
+  useEffect(() => {
+    // Kích hoạt kết nối WebSocket STOMP real-time
+    const client = connectWebSocket((newViolation) => {
+      // 1. Tự động chèn bản ghi vi phạm mới lên đầu danh sách
+      setViolations((prev) => [newViolation, ...prev]);
 
-    async function handleConfirm(id, notes) {
-        await violationAPI.confirm(id, notes);
-        setSelectedViolation(null);
-        loadData();
-    }
+      // 2. Tự động nhảy số đếm ở các thẻ thống kê StatCard
+      setStats((prev) => ({
+        ...prev,
+        totalViolations: prev.totalViolations + 1,
+        redLightCount: (newViolation.violationType === 'RED_LIGHT_CROSS' || newViolation.type === 'RED_LIGHT_CROSS')
+          ? prev.redLightCount + 1 : prev.redLightCount,
+        noHelmetCount: (newViolation.violationType === 'NO_HELMET' || newViolation.type === 'NO_HELMET')
+          ? prev.noHelmetCount + 1 : prev.noHelmetCount
+      }));
 
-    async function handleDismiss(id, notes) {
-        await violationAPI.dismiss(id, notes);
-        setSelectedViolation(null);
-        loadData();
-    }
+      // 3. Tự động cập nhật cột biểu đồ Recharts tương ứng với khung giờ hiện tại
+      const currentHour = new Date().getHours();
+      setHourlyData((prev) =>
+        prev.map((item, index) =>
+          index === currentHour ? { ...item, count: item.count + 1 } : item
+        )
+      );
+    });
 
-    return (
-        <div style={{ padding: '32px', backgroundColor: '#f8fafc', minHeight: '100vh', fontFamily: 'Inter, sans-serif' }}>
-            <header style={{ marginBottom: '28px' }}>
-                <h1 style={{ fontSize: '28px', fontWeight: '900', color: '#0f172a', margin: 0 }}>
-                    🚦 Trung Tâm Giám Sát Giao Thông Thông Minh
-                </h1>
-                <p style={{ color: '#64748b', margin: '4px 0 0 0' }}>Hệ thống phát hiện vi phạm tự động bằng Deformable DETR & IoT</p>
-            </header>
+    return () => client.deactivate(); // Ngắt kết nối khi component unmount
+  }, []);
 
-            {/* 4 THẺ THỐNG KÊ */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '20px', marginBottom: '28px' }}>
-                <StatCard title="TỔNG VI PHẠM HÔM NAY" value={stats.totalViolations} icon="🚨" color="#dc2626" subText="Tổng lượt bắt được" />
-                <StatCard title="KHÔNG ĐỘI MŨ BẢO HIỂM" value={stats.noHelmetCount} icon="⛑️" color="#d97706" subText="Lỗi ViT nhận diện" />
-                <StatCard title="VƯỢT ĐÈN ĐỎ" value={stats.redLightCount} icon="🚦" color="#7c3aed" subText="Lỗi ByteTrack nhận diện" />
-                <StatCard title="LƯU LƯỢNG XE QUA" value={stats.vehiclesPassedToday} icon="🚗" color="#059669" subText="Tổng phương tiện hôm nay" />
-            </div>
+  return (
+    <div style={{ padding: '24px', backgroundColor: '#f8fafc', minHeight: '100vh' }}>
+      <div style={{ marginBottom: '24px' }}>
+        <h1 style={{ fontSize: '24px', fontWeight: '800', color: '#0f172a', margin: 0 }}>
+          🚦 Hệ Thống Giám Sát Giao Thông Real-Time (PBL4)
+        </h1>
+        <p style={{ color: '#64748b', fontSize: '14px', marginTop: '4px' }}>
+          Tự động phát hiện vi phạm NĐ 168/2024/NĐ-CP qua AI & Cập nhật thời gian thực
+        </p>
+      </div>
 
-            {/* KHUNG CAMERA & BẢNG VI PHẠM */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.25fr', gap: '24px', alignItems: 'start' }}>
-                <LiveCamera />
-                <ViolationTable violations={violations} onSelectViolation={setSelectedViolation} />
-            </div>
-
-            {/* MODAL DUYỆT PHẠT */}
-            <ViolationModal
-                violation={selectedViolation}
-                onClose={() => setSelectedViolation(null)}
-                onConfirm={handleConfirm}
-                onDismiss={handleDismiss}
-            />
+      {/* 1. Các thẻ Thống kê Stat Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+        <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 20px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: '13px', color: '#64748b', fontWeight: '600' }}>TỔNG SỐ VI PHẠM</div>
+          <div style={{ fontSize: '28px', fontWeight: '900', color: '#0f172a', marginTop: '8px' }}>{stats.totalViolations}</div>
         </div>
-    );
+        <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 20px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: '13px', color: '#dc2626', fontWeight: '600' }}>🚨 VƯỢT ĐÈN ĐỎ</div>
+          <div style={{ fontSize: '28px', fontWeight: '900', color: '#dc2626', marginTop: '8px' }}>{stats.redLightCount}</div>
+        </div>
+        <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '16px', boxShadow: '0 4px 20px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: '13px', color: '#d97706', fontWeight: '600' }}>🪖 KHÔNG ĐỘI MŨ BH</div>
+          <div style={{ fontSize: '28px', fontWeight: '900', color: '#d97706', marginTop: '8px' }}>{stats.noHelmetCount}</div>
+        </div>
+      </div>
+
+      {/* 2. Biểu đồ 24h Recharts */}
+      <div style={{ marginBottom: '24px' }}>
+        <HourlyChart data={hourlyData} />
+      </div>
+
+      {/* 3. Bảng dữ liệu vi phạm */}
+      <ViolationTable 
+        violations={violations} 
+        onSelectViolation={(v) => setSelectedViolation(v)} 
+      />
+
+      {/* 4. Modal xem chi tiết hình phạt NĐ 168/2024 */}
+      {selectedViolation && (
+        <ViolationModal 
+          violation={selectedViolation} 
+          onClose={() => setSelectedViolation(null)} 
+        />
+      )}
+    </div>
+  );
 }
