@@ -25,13 +25,23 @@ spring.servlet.multipart.max-request-size=10MB
 # ==========================================
 # 4. MQTT (KẾT NỐI ESP32)
 # ==========================================
-mqtt.broker.url=tcp://localhost:1883
-mqtt.client.id=spring-backend-01
-mqtt.topic.alert=traffic/alert
-mqtt.topic.light=traffic/light
+mqtt.broker-url=tcp://test.mosquitto.org:1883
+# mqtt.broker-url=tcp://localhost:1883
+mqtt.client-id=pbl4-spring-backend
+mqtt.alert-topic=pbl4/nhom3/traffic/alert
+mqtt.light-topic=pbl4/nhom3/traffic/light
 
 # ==========================================
-# 5. JWT SECURITY
+# 5. CLOUDINARY (LƯU TRỮ ẢNH ĐÁM MÂY)
+# ==========================================
+cloudinary.cloud-name=your_cloud_name
+cloudinary.api-key=your_api_key
+cloudinary.api-secret=your_api_secret
+cloudinary.folder=pbl4_traffic_violations
+
+# ==========================================
+# 6. JWT SECURITY
 # ==========================================
 app.jwt.secret=pbl4-nhom3-secret-key-2026-traffic-monitor-jwt-token-secure
 app.jwt.expiration=86400000
+
