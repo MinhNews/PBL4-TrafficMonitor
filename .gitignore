@@ -1,9 +1,13 @@
-﻿ai-service/models/
-ai-service/__pycache__/
-ai-service/*.pyc
+ai-service/models/
+ai-service/dataset/
 ai-service/uploads/
 ai-service/pbl4_env/
+**/__pycache__/
+*.py[cod]
+*$py.class
 backend/src/main/resources/application.properties
+backend/bin/
+backend/target/
 frontend/node_modules/
 frontend/dist/
 *.env
@@ -12,3 +16,4 @@ uploads/
 *.pt
 *.class
 target/
+
