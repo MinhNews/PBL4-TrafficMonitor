@@ -12,11 +12,15 @@ import config
 class DeformableDetrDetector:
     def __init__(self):
         print("⏳ Đang tải mô hình Deformable DETR từ HuggingFace (SenseTime/deformable-detr)...")
+        # Tối ưu hóa tối đa các nhân CPU của máy tính
+        if hasattr(torch, "set_num_threads"):
+            torch.set_num_threads(os.cpu_count() or 4)
+
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = DeformableDetrImageProcessor.from_pretrained("SenseTime/deformable-detr")
         self.model = DeformableDetrForObjectDetection.from_pretrained("SenseTime/deformable-detr").to(self.device)
         self.model.eval()
-        print(f"✅ Deformable DETR đã sẵn sàng! Thiết bị xử lý: {self.device.upper()}")
+        print(f"✅ Deformable DETR đã sẵn sàng! Thiết bị xử lý: {self.device.upper()} (Đa luồng CPU: {os.cpu_count()} nhân)")
 
     def detect(self, frame_bgr):
         """
@@ -32,8 +36,8 @@ class DeformableDetrDetector:
         # Bước 2: Chuẩn hóa ảnh đầu vào cho PyTorch Tensor
         inputs = self.processor(images=pil_img, return_tensors="pt").to(self.device)
 
-        # Bước 3: Chạy suy luận (không tính gradient để tăng tốc)
-        with torch.no_grad():
+        # Bước 3: Chạy suy luận với inference_mode (chế độ nhanh nhất của PyTorch)
+        with torch.inference_mode():
             outputs = self.model(**inputs)
 
         # Bước 4: Hậu xử lý kết quả về kích thước khung hình gốc
@@ -44,16 +48,22 @@ class DeformableDetrDetector:
             threshold=config.DETR_CONFIDENCE_THRESHOLD
         )[0]
 
-        # Bước 5: Lọc các nhãn giao thông quan tâm (COCO: person, car, motorcycle, bus, truck)
+        # Bước 5: Lọc các nhãn giao thông quan tâm dựa trên TARGET_CLASSES (Task 2.1)
         detections = []
         for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
             class_id = label.item()
-            if class_id in config.COCO_CLASSES_OF_INTEREST:
+            # Lấy tên lớp chuẩn từ cấu hình id2label của mô hình (tránh lệch index giữa các tập COCO)
+            class_name = self.model.config.id2label.get(class_id, "").lower()
+            if not class_name and class_id in config.COCO_CLASSES_OF_INTEREST:
+                class_name = config.COCO_CLASSES_OF_INTEREST[class_id]
+
+            if class_name in config.TARGET_CLASSES:
                 box_coords = [round(i, 2) for i in box.tolist()] # [x1, y1, x2, y2]
                 detections.append({
                     "box": box_coords,
-                    "class_name": config.COCO_CLASSES_OF_INTEREST[class_id],
-                    "score": round(score.item(), 4)
+                    "class_name": class_name,
+                    "score": round(score.item(), 4),
+                    "class_id": class_id
                 })
 
         return detections
