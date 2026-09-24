@@ -27,8 +27,8 @@ const int PIN_BUZZER = 14;  // Còi báo động Active Buzzer 5V
 
 // ===== CẤU HÌNH KẾT NỐI WIFI THẬT =====
 // 👉 KHOA ĐIỀN TÊN VÀ MẬT KHẨU WIFI CỦA BẠN VÀO ĐÂY:
-const char* WIFI_SSID = "YOUR_WIFI_NAME";        // Tên WiFi (hoặc Hotspot điện thoại)
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";    // Mật khẩu WiFi
+const char* WIFI_SSID = "KHOA DEN";        // Tên WiFi (hoặc Hotspot điện thoại)
+const char* WIFI_PASS = "55555555";    // Mật khẩu WiFi
 
 // ===== CẤU HÌNH MQTT BROKER =====
 // Dùng Cloud Broker để ESP32 ở bất cứ đâu có WiFi đều nói chuyện được với Backend:
