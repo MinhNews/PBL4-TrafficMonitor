@@ -61,7 +61,7 @@ def set_light():
     if vs.is_esp32_online():
         return jsonify({
             "error": "ESP32_LOCKED",
-            "message": "Bo ESP32 thật đang hoạt động ngoài hiện trường! Hệ thống khóa toàn bộ can thiệp thủ công để đảm bảo tính xác thực 100%.",
+            "message": "Hệ thống khóa can thiệp thủ công để đảm bảo tính xác thực.",
             "light": vs.current_traffic_light,
             "esp32Online": True
         }), 403
