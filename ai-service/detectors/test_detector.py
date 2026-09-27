@@ -1,5 +1,13 @@
 import os, sys, cv2, time, threading, queue
 import numpy as np
+from flask import Flask, Response, jsonify, request
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import config
@@ -9,9 +17,84 @@ from detectors.violation_sender import (
     start_light_listener,
     send_violation_to_backend,
     check_red_light_violation,
+    check_traffic_flow,
     current_traffic_light
 )
 import detectors.violation_sender as vs
+
+# Flask MJPEG Live Streaming Server (Port 5000)
+flask_app = Flask(__name__)
+latest_jpeg = None
+frame_lock = threading.Lock()
+stream_metrics = {"fps": 0, "status": "ONLINE"}
+
+@flask_app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = '*'
+    return response
+
+@flask_app.route('/health')
+@flask_app.route('/status')
+def status():
+    w = stream_metrics.get("width", 0)
+    h = stream_metrics.get("height", 0)
+    esp32_active = vs.is_esp32_online()
+    return jsonify({
+        "status": "ONLINE",
+        "fps": stream_metrics["fps"],
+        "light": vs.current_traffic_light,
+        "esp32Online": esp32_active,
+        "remainingSeconds": vs.esp32_remaining_seconds if esp32_active else None,
+        "mode": "ESP32_HARDWARE" if esp32_active else "TEST_STANDALONE",
+        "vehiclesPassed": len(vs.passed_vehicles),
+        "violations": len(vs.violating_vehicles),
+        "width": w,
+        "height": h,
+        "orientation": "PORTRAIT" if h > w else "LANDSCAPE",
+        "timestamp": time.time()
+    })
+
+@flask_app.route('/light', methods=['POST'])
+def set_light():
+    if vs.is_esp32_online():
+        return jsonify({
+            "error": "ESP32_LOCKED",
+            "message": "Bo ESP32 thật đang hoạt động ngoài hiện trường! Hệ thống khóa toàn bộ can thiệp thủ công để đảm bảo tính xác thực 100%.",
+            "light": vs.current_traffic_light,
+            "esp32Online": True
+        }), 403
+
+    data = request.get_json(silent=True) or {}
+    new_light = data.get("light", "").upper()
+    if new_light in ["RED", "GREEN", "YELLOW"]:
+        vs.set_manual_light(new_light)
+    return jsonify({
+        "light": vs.current_traffic_light,
+        "esp32Online": False,
+        "mode": "TEST_STANDALONE"
+    })
+
+@flask_app.route('/video_feed')
+def video_feed():
+    def generate():
+        while True:
+            with frame_lock:
+                frame_bytes = latest_jpeg
+            if frame_bytes is None:
+                time.sleep(0.04)
+                continue
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            time.sleep(0.033)
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+def start_flask_server():
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+    flask_app.run(host='0.0.0.0', port=5000, threaded=True, debug=False, use_reloader=False)
 
 class AsyncViTWorker:
     """
@@ -63,6 +146,12 @@ def main():
     print("🚦 HỆ THỐNG GIÁM SÁT GIAO THÔNG AI (PBL4 - NHÓM 3) 🚦")
     print("=" * 65)
 
+    # Khởi chạy Flask Server cung cấp luồng Video trực tiếp (Port 5000) cho Web App
+    flask_thread = threading.Thread(target=start_flask_server, daemon=True)
+    flask_thread.start()
+    print("🌐 [LIVE STREAM] Server phát luồng Web mở tại: http://localhost:5000/video_feed")
+    print("📡 [LIVE STATUS] API kiểm tra camera tại: http://localhost:5000/status")
+
     # 1. Khởi tạo Mô hình Nhận diện (Dual-Mode: YOLO11 hoặc Deformable DETR)
     backend = getattr(config, "DETECTOR_BACKEND", "yolo").lower()
     if backend == "yolo":
@@ -87,8 +176,14 @@ def main():
     # 3. Khởi chạy luồng ngầm lắng nghe đèn MQTT
     mqtt_client = start_light_listener()
 
-    SOURCE = r"C:\Users\DELL\Downloads\traffic2.mp4"
-    cap = cv2.VideoCapture(SOURCE)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", default=r"C:\Users\DELL\Downloads\traffic2.mp4", help="Video path or webcam index")
+    parser.add_argument("--no-gui", action="store_true", help="Chạy chế độ nền không hiện cửa sổ OpenCV")
+    args, _ = parser.parse_known_args()
+
+    source = int(args.source) if args.source.isdigit() else args.source
+    cap = cv2.VideoCapture(source)
 
     prev_positions = {} # Lưu tọa độ Y đáy xe: {tracker_id: bottom_y}
 
@@ -97,14 +192,17 @@ def main():
     fps_display = 0
 
     print("\n💡 HƯỚNG DẪN ĐIỀU KHIỂN:")
-    print("   + Bấm phím 'r': Bật/Tắt cưỡng bức Đèn ĐỎ (để test vượt đèn đỏ)")
-    print("   + Bấm phím 'g': Bật lại Đèn XANH")
+    print("   + Bấm phím 'r': Bật cưỡng bức Đèn ĐỎ (test phạt vượt đèn đỏ)")
+    print("   + Bấm phím 'y': Bật cưỡng bức Đèn VÀNG (giảm tốc/chuẩn bị dừng)")
+    print("   + Bấm phím 'g': Bật lại Đèn XANH (lưu thông bình thường)")
     print("   + Bấm phím 'q': Thoát chương trình\n")
+
+    global latest_jpeg
 
     while True:
         ret, frame = cap.read()
         if not ret:
-            if isinstance(SOURCE, str) and os.path.exists(SOURCE):
+            if isinstance(source, str) and os.path.exists(source):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
             print("Đã hết video hoặc không thể đọc camera.")
@@ -116,30 +214,38 @@ def main():
             frame = cv2.resize(frame, (int(frame.shape[1] * scale), 720))
 
         h, w = frame.shape[:2]
+        stream_metrics["width"] = w
+        stream_metrics["height"] = h
         stop_line_y = int(h * 0.65) # Vạch dừng nằm ở 65% chiều cao khung hình
 
-        # 4. Nhận diện xe với Detector đã chọn
+        # Nhận diện xe với Detector đã chọn
         detections = detector.detect(frame)
 
-        # 5. Cập nhật bám đuôi với ByteTrack
+        # Cập nhật bám đuôi với ByteTrack
         tracked_objects = tracker.update(detections)
 
-        # 6. Vẽ Vùng Vạch Dừng quy định (Stop Zone 50px)
-        zone_color = (0, 0, 255) if vs.current_traffic_light == "RED" else (0, 255, 0)
-        # Lớp phủ bán trong suốt thể hiện vùng cấm vượt
+        # Vẽ Vùng Vạch Dừng quy định (Stop Zone 50px)
+        if vs.current_traffic_light == "RED":
+            zone_color = (0, 0, 255)      # Đỏ (BGR)
+            zone_label = f"VACH DUNG - DEN DO (Y={stop_line_y})"
+        elif vs.current_traffic_light == "YELLOW":
+            zone_color = (0, 255, 255)    # Vàng chói (BGR: B=0, G=255, R=255)
+            zone_label = f"VACH DUNG - DEN VANG (Y={stop_line_y})"
+        else:
+            zone_color = (0, 255, 0)      # Xanh lá (BGR)
+            zone_label = f"VACH DUNG - DEN XANH (Y={stop_line_y})"
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, stop_line_y - 25), (w, stop_line_y + 25), zone_color, -1)
-        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
+        cv2.addWeighted(overlay, 0.28, frame, 0.72, 0, frame)
         cv2.line(frame, (0, stop_line_y), (w, stop_line_y), zone_color, 2)
         cv2.putText(
             frame, 
-            f"VACH DUNG QUY DINH (STOP LINE Y={stop_line_y})", 
-            (15, stop_line_y - 28), 
+            zone_label, 
+            (10, stop_line_y - 8), 
             cv2.FONT_HERSHEY_SIMPLEX, 0.45, zone_color, 2
         )
 
-
-        # 7. Duyệt qua từng đối tượng đang được theo dõi
+        # Duyệt qua từng đối tượng đang được theo dõi
         for obj in tracked_objects:
             x1, y1, x2, y2 = map(int, obj["box"])
             tr_id = obj["tracker_id"]
@@ -147,12 +253,16 @@ def main():
             conf = obj["score"]
             curr_bottom_y = y2
 
-            # A. KIỂM TRA LỖI VƯỢT ĐÈN ĐỎ
+            # A. KIỂM TRA LỖI VƯỢT ĐÈN ĐỎ & ĐẾM LƯU LƯỢNG XE QUA NGÃ TƯ THỰC TẾ
             is_violating_red_light = False
             if tr_id in prev_positions:
                 prev_bottom_y = prev_positions[tr_id]
                 is_violating_red_light = check_red_light_violation(
                     tr_id, prev_bottom_y, curr_bottom_y, frame, cls_name, conf, stop_line_y=stop_line_y
+                )
+                # Đếm số lượng xe thực tế lưu thông qua ngã tư và đồng bộ về database
+                check_traffic_flow(
+                    tr_id, prev_bottom_y, curr_bottom_y, cls_name, stop_line_y=stop_line_y
                 )
             prev_positions[tr_id] = curr_bottom_y
 
@@ -162,82 +272,100 @@ def main():
                 head_h = max(10, int((y2 - y1) * 0.35))
                 head_crop = frame[max(0, y1):min(h, y1 + head_h), max(0, x1):min(w, x2)]
                 
-                # Gửi ảnh vùng đầu vào luồng ngầm ViT phân tích (không làm đứng video)
                 if head_crop.size > 0 and head_crop.shape[0] >= 15 and head_crop.shape[1] >= 15:
                     vit_worker.submit(tr_id, head_crop, frame)
 
             # C. VẼ BOUNDING BOX VÀ NHÃN HIỂN THỊ
             if is_violating_red_light:
                 box_color = (0, 0, 255) # Đỏ rực báo động vượt đèn đỏ
-                label = f"[VUOT DEN DO] Xe #{tr_id}!"
+                label = f"[VUOT DEN] #{tr_id}"
             elif is_violating_helmet:
                 box_color = (0, 0, 255) # Đỏ cảnh báo không đội mũ
-                label = f"[KO DOI MU BH] Xe #{tr_id}"
+                label = f"[KO MU] #{tr_id}"
             elif cls_name == "person":
                 box_color = (0, 255, 255) # Vàng cho người
-                label = f"Nguoi #{tr_id} {int(conf*100)}%"
+                label = f"Nguoi #{tr_id}"
             else:
                 box_color = (255, 200, 0) # Xanh dương nhạt cho xe
-                label = f"Xe #{tr_id} {cls_name} {int(conf*100)}%"
+                label = f"{cls_name.upper()} #{tr_id}"
 
             # Vẽ khung viền xe
             box_thick = 3 if is_violating_red_light else 2
             cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, box_thick)
 
-            # Vẽ nền chữ nổi (Text Badge) giúp chữ đọc cực rõ, không bị chìm vào mặt đường
-            font_scale = 0.45
+            # Vẽ nền chữ nổi (Text Badge) giúp chữ đọc cực rõ
+            font_scale = 0.4
             (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
             badge_y = max(th + 6, y1)
-            cv2.rectangle(frame, (x1, badge_y - th - 5), (x1 + tw + 6, badge_y + 3), box_color, -1)
+            cv2.rectangle(frame, (x1, badge_y - th - 4), (x1 + tw + 4, badge_y + 2), box_color, -1)
             text_color = (255, 255, 255) if (is_violating_red_light or is_violating_helmet) else (0, 0, 0)
-            cv2.putText(frame, label, (x1 + 3, badge_y - 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
+            cv2.putText(frame, label, (x1 + 2, badge_y - 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
 
-        # 8. Hiển thị thông tin hệ thống (FPS & Trạng thái đèn)
+        # Hiển thị thông tin hệ thống (FPS & Trạng thái đèn)
         fps_count += 1
         if time.time() - start_time >= 1.0:
             fps_display = fps_count
             fps_count = 0
             start_time = time.time()
+            stream_metrics["fps"] = fps_display
 
-        # Badge trạng thái đèn và mô hình đang dùng
-        light_badge_color = (0, 0, 255) if vs.current_traffic_light == "RED" else (0, 255, 0)
-        cv2.putText(frame, f"DEN: {vs.current_traffic_light}", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, light_badge_color, 2)
-        cv2.putText(frame, f"MODEL: {mode_label}", (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 2)
-        cv2.putText(frame, f"FPS: {fps_display}", (w - 120, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # Badge trạng thái đèn và mô hình trên HUD
+        if vs.current_traffic_light == "RED":
+            light_badge_color = (0, 0, 255)      # Đỏ
+        elif vs.current_traffic_light == "YELLOW":
+            light_badge_color = (0, 215, 255)    # Vàng
+        else:
+            light_badge_color = (0, 200, 0)      # Xanh
+        cv2.putText(frame, f"DEN: {vs.current_traffic_light}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, light_badge_color, 2)
+        cv2.putText(frame, f"FPS: {fps_display}", (w - 75, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(frame, f"AI: {mode_label}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
 
         # Banner cảnh báo và thống kê vi phạm trên HUD
         total_viols = len(vs.violating_vehicles)
-        viol_bg = (0, 0, 220) if total_viols > 0 else (40, 40, 40)
-        cv2.rectangle(frame, (10, 85), (w - 10, 125), viol_bg, -1)
-        cv2.rectangle(frame, (10, 85), (w - 10, 125), (255, 255, 255), 1)
+        viol_bg = (0, 0, 200) if total_viols > 0 else (30, 30, 30)
+        cv2.rectangle(frame, (8, 65), (w - 8, 95), viol_bg, -1)
+        cv2.rectangle(frame, (8, 65), (w - 8, 95), (200, 200, 200), 1)
 
         now_ts = time.time()
         active_viols = [t_id for t_id, t_time in vs.reported_violations.items() if now_ts - t_time < 4.0]
         if active_viols:
             banner_text = f"CANH BAO: XE #{active_viols[-1]} VUOT DEN DO!"
         else:
-            banner_text = f"SO XE VUOT DEN DO: {total_viols}"
-        cv2.putText(frame, banner_text, (15, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
+            banner_text = f"VI PHAM: {total_viols} | DA QUA: {len(vs.passed_vehicles)}"
+        cv2.putText(frame, banner_text, (14, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-        cv2.imshow("PBL4 - Traffic Monitor AI (Dual-Mode: YOLO11 / Deformable DETR)", frame)
+        # Cập nhật buffer phát sóng trực tiếp qua mạng HTTP MJPEG
+        ret_enc, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ret_enc:
+            with frame_lock:
+                latest_jpeg = buffer.tobytes()
 
-
-
-
-        # 9. Bắt phím điều khiển
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('r'):
-            vs.current_traffic_light = "RED"
-            print("🚦 [THỦ CÔNG] Đã bật cưỡng bức ĐÈN ĐỎ!")
-        elif key == ord('g'):
-            vs.current_traffic_light = "GREEN"
-            print("🚦 [THỦ CÔNG] Đã bật lại ĐÈN XANH!")
+        # Hiển thị cửa sổ OpenCV (nếu bật GUI)
+        if not args.no_gui:
+            try:
+                cv2.imshow("PBL4 - Traffic Monitor AI (Dual-Mode: YOLO11 / Deformable DETR)", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord('r'):
+                    vs.set_manual_light("RED")
+                elif key == ord('y'):
+                    vs.set_manual_light("YELLOW")
+                elif key == ord('g'):
+                    vs.set_manual_light("GREEN")
+                elif key == ord('a'):
+                    vs.reset_to_auto_esp32()
+            except Exception:
+                time.sleep(0.02)
+        else:
+            time.sleep(0.025)
 
     vit_worker.running = False
     cap.release()
-    cv2.destroyAllWindows()
+    try:
+        cv2.destroyAllWindows()
+    except Exception:
+        pass
     if mqtt_client:
         mqtt_client.loop_stop()
 

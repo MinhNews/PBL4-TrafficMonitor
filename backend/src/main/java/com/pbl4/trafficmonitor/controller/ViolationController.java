@@ -45,4 +45,13 @@ public class ViolationController {
         String notes = body != null ? body.get("notes") : null;
         return ResponseEntity.ok(violationService.dismissViolation(id, notes));
     }
+
+    @PostMapping("/test-alert")
+    public ResponseEntity<Map<String, Object>> testAlert() {
+        violationService.triggerTestAlert();
+        return ResponseEntity.ok(Map.of(
+            "status", "SUCCESS",
+            "message", "Đã gửi lệnh kích hoạt còi hú tới ESP32 qua kênh MQTT Mosquitto thành công!"
+        ));
+    }
 }

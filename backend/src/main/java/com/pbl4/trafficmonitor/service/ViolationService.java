@@ -138,6 +138,16 @@ public class ViolationService {
         return toResponseDTO(violationRepo.save(v));
     }
 
+    public void triggerTestAlert() {
+        try {
+            String alertPayload = "{\"type\":\"MANUAL_TEST\",\"vehicleType\":\"ALL\",\"fine\":\"0 VNĐ\",\"beepTimes\":4,\"message\":\"TEST CÒI HÚ TỪ GIAO DIỆN WEB\"}";
+            mqttPublisherService.publishAlert(alertPayload);
+            log.info("🚨 [MQTT TEST] Đã phát lệnh còi hú khẩn cấp tới ESP32 qua topic alert!");
+        } catch (Exception e) {
+            log.error("❌ Lỗi khi gửi lệnh test còi qua MQTT: {}", e.getMessage());
+        }
+    }
+
     public ViolationResponseDTO toResponseDTO(Violation v) {
         // Tự động tra cứu mức phạt và điểm trừ theo Nghị định 168/2024/NĐ-CP
         PenaltyRuleHelper.PenaltyInfo penalty = PenaltyRuleHelper.calculatePenalty(

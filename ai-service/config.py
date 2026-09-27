@@ -4,9 +4,9 @@ VIOLATION_ENDPOINT = f"{BACKEND_URL}/api/violations"
 CAMERA_ID = 1
 
 # ===== MQTT =====
-MQTT_BROKER = "localhost"
+MQTT_BROKER = "test.mosquitto.org"
 MQTT_PORT = 1883
-MQTT_TOPIC_LIGHT = "traffic/light"
+MQTT_TOPIC_LIGHT = "pbl4/nhom3/traffic/light"
 
 # ===== CAMERA =====
 WEBCAM_INDEX = 0  # 0=webcam mặc định

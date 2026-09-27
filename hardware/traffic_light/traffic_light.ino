@@ -65,8 +65,6 @@ void updateOLED(const char* state, int remaining, bool isAlert = false) {
         display.setTextSize(1);
         display.setCursor(6, 42);
         display.print("PHAT HIEN VI PHAM");
-        display.setCursor(12, 53);
-        display.print("COI HU HIEN TRUONG");
     } else {
         // Màn hình hiển thị trạng thái đèn và số giây đếm ngược
         display.setTextSize(2);

@@ -21,7 +21,16 @@ public class StatsController {
 
     @GetMapping("/hourly")
     public ResponseEntity<List<HourlyStatDTO>> getHourlyStats(@RequestParam(required = false) String date) {
-        LocalDate d = (date != null) ? LocalDate.parse(date) : LocalDate.now();
+        LocalDate d = (date != null && !date.trim().isEmpty()) ? LocalDate.parse(date.trim()) : LocalDate.now();
         return ResponseEntity.ok(statsService.getHourlyStats(d));
+    }
+
+    @PostMapping("/flow")
+    public ResponseEntity<?> recordTrafficFlow(@RequestBody java.util.Map<String, Object> body) {
+        Long cameraId = body.get("cameraId") != null ? Long.valueOf(body.get("cameraId").toString()) : 1L;
+        Integer count = body.get("count") != null ? Integer.valueOf(body.get("count").toString()) : 1;
+        String vehicleType = body.get("vehicleType") != null ? body.get("vehicleType").toString() : "vehicle";
+        statsService.recordVehicleCount(cameraId, count, vehicleType);
+        return ResponseEntity.ok(java.util.Map.of("success", true, "recorded", count, "vehicleType", vehicleType));
     }
 }
