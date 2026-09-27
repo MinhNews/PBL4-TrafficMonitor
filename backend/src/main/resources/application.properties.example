@@ -34,9 +34,9 @@ mqtt.light-topic=pbl4/nhom3/traffic/light
 # ==========================================
 # 5. CLOUDINARY (LƯU TRỮ ẢNH ĐÁM MÂY)
 # ==========================================
-cloudinary.cloud-name=your_cloud_name
-cloudinary.api-key=your_api_key
-cloudinary.api-secret=your_api_secret
+cloudinary.cloud-name=ddvrj9vdi
+cloudinary.api-key=662877816484734
+cloudinary.api-secret=ho7R6Hstn3cMLcU4uv3GrRmEyiI
 cloudinary.folder=pbl4_traffic_violations
 
 # ==========================================
