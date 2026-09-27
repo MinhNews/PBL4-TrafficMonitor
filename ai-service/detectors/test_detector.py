@@ -176,9 +176,12 @@ def main():
     # 3. Khởi chạy luồng ngầm lắng nghe đèn MQTT
     mqtt_client = start_light_listener()
 
+    dataset_video = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset", "traffic2.mp4"))
+    default_source = dataset_video if os.path.exists(dataset_video) else (r"C:\Users\DELL\Downloads\traffic2.mp4" if os.path.exists(r"C:\Users\DELL\Downloads\traffic2.mp4") else "0")
+
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", default=r"C:\Users\DELL\Downloads\traffic2.mp4", help="Video path or webcam index")
+    parser.add_argument("--source", default=default_source, help="Video path or webcam index")
     parser.add_argument("--no-gui", action="store_true", help="Chạy chế độ nền không hiện cửa sổ OpenCV")
     args, _ = parser.parse_known_args()
 
