@@ -3,11 +3,11 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 const STREAM_URL = 'http://localhost:5000/video_feed';
 const STATUS_URL = 'http://localhost:5000/status';
 const LIGHT_URL = 'http://localhost:5000/light';
-const CHECK_INTERVAL = 3000;
+const CHECK_INTERVAL = 1000;
 
 export default function LiveCamera() {
     const [streamStatus, setStreamStatus] = useState('connecting'); // connecting | live | offline
-    const [metrics, setMetrics] = useState({ fps: 30, light: 'GREEN', vehiclesPassed: 0, violations: 0, width: 0, height: 0, orientation: 'PORTRAIT' });
+    const [metrics, setMetrics] = useState({ fps: 30, light: 'GREEN', vehiclesPassed: 0, violations: 0, width: 0, height: 0, orientation: 'PORTRAIT', esp32Online: false });
     const [retryCount, setRetryCount] = useState(0);
     const [viewMode, setViewMode] = useState('AUTO'); // 'AUTO' | 'PORTRAIT' | 'LANDSCAPE'
     const [videoDims, setVideoDims] = useState({ width: 0, height: 0 });
@@ -19,7 +19,7 @@ export default function LiveCamera() {
     const probe = useCallback(async () => {
         try {
             const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 1500);
+            const timer = setTimeout(() => controller.abort(), 3500);
             const res = await fetch(STATUS_URL, { signal: controller.signal });
             clearTimeout(timer);
             if (res.ok) {

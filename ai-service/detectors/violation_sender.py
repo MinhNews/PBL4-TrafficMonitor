@@ -48,27 +48,37 @@ def on_mqtt_message(client, userdata, msg):
             if new_status in ["RED", "YELLOW", "GREEN"]:
                 current_traffic_light = new_status
             esp32_remaining_seconds = data.get("remainingSeconds")
+            print(f"🚦 [TÍN HIỆU TỪ ESP32] Đèn: {current_traffic_light} | Đếm ngược: {esp32_remaining_seconds}s")
         else:
             txt = str(data).upper()
             if txt in ["RED", "YELLOW", "GREEN"]:
                 current_traffic_light = txt
+            print(f"🚦 [TÍN HIỆU TỪ ESP32] Đèn: {current_traffic_light}")
     except Exception:
         text = msg.payload.decode('utf-8').strip().strip('"').upper()
         if text in ["RED", "YELLOW", "GREEN"]:
             current_traffic_light = text
+            print(f"🚦 [TÍN HIỆU TỪ ESP32] Đèn: {current_traffic_light}")
 
 def _connect_mqtt_thread(client, broker, port, topic):
+    def _on_connect(cl, userdata, flags, rc, properties=None):
+        if rc == 0:
+            print(f"✅ [MQTT] Đã kết nối Broker '{broker}:{port}'! Đang subscribe '{topic}'...")
+            cl.subscribe(topic)
+        else:
+            print(f"❌ [MQTT Warning] Kết nối Broker thất bại, rc={rc}")
+
+    client.on_connect = _on_connect
     try:
-        client.connect(broker, port, keepalive=15)
-        client.subscribe(topic)
+        client.connect(broker, port, keepalive=30)
         client.loop_start()
-        print(f"[MQTT] Dang lang nghe den tin hieu tai '{broker}:{port}', topic: '{topic}'")
     except Exception as e:
-        print(f"[MQTT Warning] Khong the ket noi toi Broker {broker}: {e}. Dung che do doc lap.")
+        print(f"[MQTT Warning] Không thể kết nối tới Broker {broker}: {e}. Dùng chế độ độc lập.")
 
 def start_light_listener():
     """Khởi chạy luồng ngầm lắng nghe trạng thái đèn giao thông"""
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2 if hasattr(mqtt, "CallbackAPIVersion") else None, client_id="AI_TrafficLight_Listener")
+    unique_id = f"AI_Light_{int(time.time())}_{os.getpid()}"
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2 if hasattr(mqtt, "CallbackAPIVersion") else None, client_id=unique_id)
     client.on_message = on_mqtt_message
 
     broker = getattr(config, "MQTT_BROKER", "test.mosquitto.org")
