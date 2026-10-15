@@ -15,20 +15,12 @@ FRAME_HEIGHT = 480
 PROCESS_EVERY_N_FRAMES = 1  # Chạy AI mỗi 1 frame để tăng FPS
 
 # ===== AI THRESHOLDS =====
-# Ngưỡng tin cậy 0.22: Bắt dính liên tục mọi xe máy ở xa (30-40%), triệt tiêu hoàn toàn hiện tượng nhấp nháy
-DETR_CONFIDENCE_THRESHOLD = 0.22
+YOLO_CONFIDENCE_THRESHOLD = 0.25
 VIT_CONFIDENCE_THRESHOLD = 0.85
-NO_HELMET_FRAMES_REQUIRED = 5
+NO_HELMET_FRAMES_REQUIRED = 3
 
-# ===== DUAL-MODE DETECTOR (Chuyển đổi linh hoạt giữa YOLO và Deformable DETR) =====
-# "yolo"           : Chạy YOLO11 siêu mượt 30 FPS thời gian thực cho demo thực chiến
-# "deformable_detr": Chạy SenseTime/deformable-detr cho báo cáo lý thuyết đồ án
-DETECTOR_BACKEND = "yolo"
-
-# Phiên bản YOLO sử dụng (tự động tải về):
-# "yolo11n.pt" : Bản Nano (2.6M params) - 30 FPS mượt nhất, siêu nhẹ
-# "yolo11s.pt" : Bản Small (9.4M params)
-# "yolo11m.pt" : Bản Medium (20M params) - Độ chính xác cao
+# ===== OBJECT DETECTOR =====
+# Phiên bản YOLO sử dụng: "yolo11n.pt" (Bản Nano 2.6M params - 30 FPS thời gian thực)
 YOLO_MODEL_NAME = "yolo11n.pt"
 
 

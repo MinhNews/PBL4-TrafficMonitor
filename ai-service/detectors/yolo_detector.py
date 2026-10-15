@@ -15,16 +15,17 @@ class YoloDetector:
         {'box': [x1, y1, x2, y2], 'class_name': 'car', 'score': 0.88, 'class_id': 2}, ...
     ]
     """
-    def __init__(self, model_name=None, conf_threshold=None, imgsz=416):
+    def __init__(self, model_name=None, conf_threshold=None, imgsz=640):
         self.model_name = model_name or getattr(config, "YOLO_MODEL_NAME", "yolo11n.pt")
-        self.conf_threshold = conf_threshold or getattr(config, "DETR_CONFIDENCE_THRESHOLD", 0.35)
+        self.conf_threshold = conf_threshold or getattr(config, "YOLO_CONFIDENCE_THRESHOLD", 0.35)
         self.imgsz = imgsz
-        print(f"[YOLO] Dang nap mo hinh: {self.model_name} (imgsz={self.imgsz}, conf={self.conf_threshold})...")
+        self.classes_filter = [0, 1, 2, 3, 5, 7] # person, bicycle, car, motorcycle, bus, truck
+        print(f"[YOLO] Dang nap mo hinh: {self.model_name} (imgsz={self.imgsz}, conf={self.conf_threshold}, iou=0.60)...")
         self.model = YOLO(self.model_name)
 
         # Chạy khởi động (Warmup) để triệt tiêu độ trễ compile ở frame đầu tiên
         dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
-        _ = self.model.predict(dummy, imgsz=self.imgsz, verbose=False)
+        _ = self.model.predict(dummy, imgsz=self.imgsz, classes=self.classes_filter, verbose=False)
         print(f"[YOLO] Mo hinh {self.model_name} da san sang!")
 
 
@@ -37,10 +38,12 @@ class YoloDetector:
         if frame_bgr is None or frame_bgr.size == 0:
             return []
 
-        # Chạy dự đoán với YOLO
+        # Chạy dự đoán với YOLO (lọc classes giao thông trực tiếp, iou=0.60 giữ đúng cả người ngồi sau)
         results = self.model.predict(
             frame_bgr,
             conf=self.conf_threshold,
+            iou=0.60,
+            classes=self.classes_filter,
             imgsz=self.imgsz,
             verbose=False
         )[0]

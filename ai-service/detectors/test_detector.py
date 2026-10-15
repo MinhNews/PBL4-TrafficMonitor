@@ -4,8 +4,8 @@ from flask import Flask, Response, jsonify, request
 
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
+        sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+        sys.stderr.reconfigure(encoding='utf-8', line_buffering=True)
     except Exception:
         pass
 
@@ -99,41 +99,84 @@ def start_flask_server():
 class AsyncViTWorker:
     """
     Luồng ngầm xử lý phân loại Mũ bảo hiểm (ViT):
-    ViT chạy nền độc lập, KHÔNG BAO GIỜ làm gián đoạn hay giảm FPS của luồng video chính!
+    Đánh giá liên tục theo thời gian thực (real-time reactive), tự động chuyển đổi giữa [CO MU] và [KO MU].
     """
     def __init__(self, helmet_clf):
         self.helmet_clf = helmet_clf
-        self.queue = queue.Queue(maxsize=10)
-        self.checked_tracks = {}      # {tr_id: is_violating}
-        self.processing_tracks = set() # Các xe đang được tính toán ngầm
+        self.queue = queue.Queue(maxsize=20)
+        self.track_status = {}         # {tr_id: {"is_no_helmet": bool, "conf": float}}
+        self.reported_violations = {}  # {entity_key: timestamp} - Cooldown 30s chống báo lặp liên tục
+        self.processing_tracks = set()
+        self.last_checked = {}         # {tr_id: timestamp}
         self.running = True
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
-    def submit(self, tr_id, head_crop, full_frame):
-        if tr_id in self.checked_tracks or tr_id in self.processing_tracks:
+    def submit(self, tr_id, head_crop, clean_frame, moto_id=None, box=None):
+        now = time.time()
+        # Throttle: chỉ submit lại mỗi 0.12s để bắt kịp xe di chuyển nhanh
+        if tr_id in self.processing_tracks or (now - self.last_checked.get(tr_id, 0)) < 0.12:
             return
         if not self.queue.full():
             self.processing_tracks.add(tr_id)
-            self.queue.put_nowait((tr_id, head_crop.copy(), full_frame.copy()))
+            self.last_checked[tr_id] = now
+            self.queue.put_nowait((tr_id, head_crop.copy(), clean_frame, moto_id, box))
 
     def get_status(self, tr_id):
-        return self.checked_tracks.get(tr_id, False)
+        # Trả về: (is_no_helmet: bool, conf: float, has_result: bool)
+        if tr_id in self.track_status:
+            info = self.track_status[tr_id]
+            return info["is_no_helmet"], info["conf"], True
+        return False, 0.0, False
+
+    def cleanup_old_tracks(self, active_tr_ids):
+        now = time.time()
+        expired = [tid for tid, ts in self.last_checked.items() if tid not in active_tr_ids and (now - ts) > 5.0]
+        for tid in expired:
+            self.track_status.pop(tid, None)
+            self.last_checked.pop(tid, None)
+
+        # Dọn dẹp bộ đếm frame trong classifier
+        self.helmet_clf.cleanup_history(active_tr_ids)
+
+        # Dọn dẹp cooldown vi phạm đã hết hạn sau 60 giây
+        stale_entities = [k for k, ts in self.reported_violations.items() if (now - ts) > 60.0]
+        for k in stale_entities:
+            self.reported_violations.pop(k, None)
 
     def _worker(self):
         while self.running:
             try:
-                tr_id, head_crop, full_frame = self.queue.get(timeout=0.1)
+                tr_id, head_crop, clean_frame, moto_id, box = self.queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
             try:
                 # Phân tích vùng đầu với Vision Transformer (ViT)
                 confirmed_no_helmet, h_conf = self.helmet_clf.update_and_check(tr_id, head_crop)
-                self.checked_tracks[tr_id] = confirmed_no_helmet
+                self.track_status[tr_id] = {"is_no_helmet": confirmed_no_helmet, "conf": h_conf}
+
+                entity_key = f"moto_{moto_id}" if moto_id is not None else f"person_{tr_id}"
+
                 if confirmed_no_helmet:
-                    print(f"🚨 [PHÁT HIỆN VI PHẠM] Xe #{tr_id} KHÔNG ĐỘI MŨ BẢO HIỂM! (Độ tin cậy: {int(h_conf*100)}%)")
-                    send_violation_to_backend(full_frame, "NO_HELMET", "MOTORCYCLE", h_conf)
+                    now = time.time()
+                    last_sent = self.reported_violations.get(entity_key, 0)
+                    # Mỗi phương tiện / người tối đa 1 biên bản vi phạm trong 30 giây
+                    if (now - last_sent) > 30.0:
+                        self.reported_violations[entity_key] = now
+                        target_label = f"Xe máy #{moto_id}" if moto_id is not None else f"Người #{tr_id}"
+                        print(f"🚨 [PHÁT HIỆN VI PHẠM] {target_label} KHÔNG ĐỘI MŨ BẢO HIỂM! (Độ tin cậy: {int(h_conf*100)}%)")
+
+                        # Tạo ảnh bằng chứng sạch gửi Backend
+                        evidence = clean_frame.copy()
+                        if box is not None:
+                            bx1, by1, bx2, by2 = map(int, box)
+                            cv2.rectangle(evidence, (bx1, by1), (bx2, by2), (0, 0, 255), 2)
+                            cv2.putText(evidence, f"KHONG DOI MU {int(h_conf*100)}%", (bx1, max(20, by1 - 6)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+                        send_violation_to_backend(evidence, "NO_HELMET", "MOTORCYCLE", h_conf)
+                # TUYỆT ĐỐI KHÔNG CÓ NHÁNH ELSE XÓA KEY (Tránh spam lặp lại khi xe chở 2 người 1 có 1 không mũ)
             except Exception as e:
                 print(f"[ViT Worker Error] {e}")
             finally:
@@ -141,7 +184,54 @@ class AsyncViTWorker:
                     self.processing_tracks.remove(tr_id)
                 self.queue.task_done()
 
+def find_riders(tracked_objects, is_standalone=False):
+    """
+    Xác định người đang điều khiển / ngồi trên xe máy (Riders):
+    - is_standalone=True: Cho phép test cá nhân tại nhà không cần xe máy (webcam hoặc ảnh chụp).
+    - Video giao thông: Chỉ kiểm tra person có bounding box chồng lấn lên motorcycle.
+    Trả về dict: {person_tr_id: moto_tr_id}
+    """
+    persons = [o for o in tracked_objects if o["class_name"] == "person"]
+    motos = [o for o in tracked_objects if o["class_name"] == "motorcycle"]
+
+    if is_standalone:
+        return {p["tracker_id"]: None for p in persons}
+
+    if len(motos) == 0:
+        return {} # Trong video giao thông nếu không có xe máy nào thì không bắt người đi bộ
+
+    riders = {}
+    for p in persons:
+        px1, py1, px2, py2 = p["box"]
+        p_area = max(1.0, (px2 - px1) * (py2 - py1))
+        pcx = (px1 + px2) / 2.0
+
+        best_moto_id = None
+        max_overlap = 0.0
+
+        for m in motos:
+            mx1, my1, mx2, my2 = m["box"]
+            ix = max(0.0, min(px2, mx2) - max(px1, mx1))
+            iy = max(0.0, min(py2, my2) - max(py1, my1))
+            inter_area = ix * iy
+
+            overlap_ratio = inter_area / p_area
+            # Điều kiện:
+            # 1. Chồng lấn diện tích >= 20%
+            # 2. Tâm ngang của người phải nằm TRONG chiều ngang xe máy (loại bỏ người đứng cạnh xe)
+            # 3. Đỉnh đầu người phải ở nửa trên xe
+            if overlap_ratio > 0.20 and (mx1 <= pcx <= mx2) and py1 < (my1 + (my2 - my1) * 0.6):
+                if overlap_ratio > max_overlap:
+                    max_overlap = overlap_ratio
+                    best_moto_id = m["tracker_id"]
+
+        if best_moto_id is not None:
+            riders[p["tracker_id"]] = best_moto_id
+
+    return riders
+
 def main():
+    global latest_jpeg
     print("=" * 65)
     print("🚦 HỆ THỐNG GIÁM SÁT GIAO THÔNG AI (PBL4 - NHÓM 3) 🚦")
     print("=" * 65)
@@ -152,21 +242,12 @@ def main():
     print("🌐 [LIVE STREAM] Server phát luồng Web mở tại: http://localhost:5000/video_feed")
     print("📡 [LIVE STATUS] API kiểm tra camera tại: http://localhost:5000/status")
 
-    # 1. Khởi tạo Mô hình Nhận diện (Dual-Mode: YOLO11 hoặc Deformable DETR)
-    backend = getattr(config, "DETECTOR_BACKEND", "yolo").lower()
-    if backend == "yolo":
-        from detectors.yolo_detector import YoloDetector
-        yolo_model = getattr(config, "YOLO_MODEL_NAME", "yolo11n.pt")
-        print(f"🚀 [CHẾ ĐỘ THỜI GIAN THỰC] Sử dụng: YOLO11 ({yolo_model})")
-        print(f"   + Ưu điểm: Tốc độ cao ~30 FPS, Bounding Box bám dính tức thì!")
-        detector = YoloDetector(model_name=yolo_model)
-        mode_label = f"YOLO11 ({yolo_model})"
-    else:
-        from detectors.deformable_detr_detector import DeformableDetrDetector
-        print(f"🏛️ [CHẾ ĐỘ HỌC THUẬT] Sử dụng: Deformable DETR (SenseTime)")
-        print(f"   + Ưu điểm: Phục vụ báo cáo lý thuyết đồ án và nghiên cứu SOTA!")
-        detector = DeformableDetrDetector()
-        mode_label = "Deformable DETR"
+    # 1. Khởi tạo Mô hình Nhận diện YOLO11 (Real-time 30 FPS)
+    from detectors.yolo_detector import YoloDetector
+    yolo_model = getattr(config, "YOLO_MODEL_NAME", "yolo11n.pt")
+    print(f"🚀 [MÔ HÌNH NHẬN DIỆN] YOLO11 ({yolo_model}) - 30 FPS thời gian thực")
+    detector = YoloDetector(model_name=yolo_model)
+    mode_label = f"YOLO11 ({yolo_model})"
 
     # 2. Khởi tạo ByteTrack và ViT Worker
     tracker = ByteTrackerManager()
@@ -177,18 +258,112 @@ def main():
     mqtt_client = start_light_listener()
 
     dataset_video = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset", "traffic2.mp4"))
-    default_source = dataset_video if os.path.exists(dataset_video) else (r"C:\Users\DELL\Downloads\traffic2.mp4" if os.path.exists(r"C:\Users\DELL\Downloads\traffic2.mp4") else "0")
+    default_source = dataset_video if os.path.exists(dataset_video) else "0"
 
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=default_source, help="Video path or webcam index")
     parser.add_argument("--no-gui", action="store_true", help="Chạy chế độ nền không hiện cửa sổ OpenCV")
+    parser.add_argument("--standalone", action="store_true", help="Chế độ test mũ bảo hiểm cá nhân (không yêu cầu xe máy)")
     args, _ = parser.parse_known_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
+
+    # KIỂM TRA NẾU NGUỒN VÀO LÀ FILE ẢNH TĨNH (.jpg, .png, .jpeg...)
+    is_image = isinstance(source, str) and os.path.isfile(source) and source.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp'))
+    if is_image:
+        print(f"📸 [CHẾ ĐỘ TEST ẢNH TĨNH] Đang phân tích file ảnh: '{source}'...")
+        raw_img = cv2.imread(source)
+        if raw_img is None:
+            print("❌ Không thể đọc file ảnh (file hỏng hoặc sai định dạng).")
+            return
+
+        frame = raw_img.copy()
+        if frame.shape[0] > 720:
+            scale = 720 / frame.shape[0]
+            frame = cv2.resize(frame, (int(frame.shape[1] * scale), 720))
+
+        clean_frame = frame.copy()
+
+        h, w = frame.shape[:2]
+        stream_metrics["width"] = w
+        stream_metrics["height"] = h
+
+        detections = detector.detect(frame)
+        found_targets = 0
+
+        for idx, obj in enumerate(detections):
+            x1, y1, x2, y2 = map(int, obj["box"])
+            cls_name = obj["class_name"]
+
+            if cls_name == "person":
+                found_targets += 1
+                # Cắt chuẩn xác vùng đầu từ clean_frame (trung tâm 55% chiều ngang, 28% chiều cao đỉnh đầu)
+                cx = (x1 + x2) // 2
+                hw = int((x2 - x1) * 0.55)
+                head_crop = clean_frame[max(0, y1):min(h, y1 + int((y2 - y1) * 0.28)), max(0, cx - hw // 2):min(w, cx + hw // 2)]
+
+                is_no_helmet, conf = helmet_clf.predict_head(head_crop)
+
+                if is_no_helmet:
+                    box_color = (0, 0, 255) # Đỏ
+                    label = f"[KO MU] {int(conf * 100)}%"
+                    text_color = (255, 255, 255)
+                    print(f"🚨 Người #{found_targets}: KHÔNG ĐỘI MŨ (Độ tin cậy: {int(conf * 100)}%)")
+                    send_violation_to_backend(frame, "NO_HELMET", "MOTORCYCLE", conf)
+
+                    # Chỉ vẽ viền đỏ nổi bật cho người KHÔNG ĐỘI MŨ
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+                    font_scale = 0.5
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)
+                    badge_y = max(th + 6, y1)
+                    cv2.rectangle(frame, (x1, badge_y - th - 4), (x1 + tw + 6, badge_y + 2), box_color, -1)
+                    cv2.putText(frame, label, (x1 + 3, badge_y - 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 2)
+                else:
+                    # Người CÓ ĐỘI MŨ: Tuyệt đối không vẽ gì lên ảnh để giữ màn hình sạch sẽ, không rối mắt
+                    print(f"✅ Người #{found_targets}: CÓ ĐỘI MŨ (Độ tin cậy: {int(conf * 100)}%)")
+
+        # Nếu là ảnh chụp cận cảnh đầu (YOLO không nhận diện được toàn thân)
+        if found_targets == 0:
+            is_no_helmet, conf = helmet_clf.predict_head(frame)
+            if is_no_helmet:
+                box_color = (0, 0, 255)
+                label = f"[KO MU] {int(conf * 100)}%"
+                text_color = (255, 255, 255)
+                print(f"🚨 KẾT QUẢ CẬN CẢNH: KHÔNG ĐỘI MŨ (Độ tin cậy: {int(conf * 100)}%)")
+                send_violation_to_backend(frame, "NO_HELMET", "MOTORCYCLE", conf)
+
+                cv2.rectangle(frame, (10, 10), (w - 10, h - 10), box_color, 3)
+                font_scale = 0.7
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)
+                cv2.rectangle(frame, (10, 10 + th + 10), (10 + tw + 10, 10), box_color, -1)
+                cv2.putText(frame, label, (15, 10 + th + 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 2)
+            else:
+                print(f"✅ KẾT QUẢ CẬN CẢNH: CÓ ĐỘI MŨ (Độ tin cậy: {int(conf * 100)}%)")
+
+        ret_enc, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ret_enc:
+            with frame_lock:
+                latest_jpeg = buffer.tobytes()
+
+        if not args.no_gui:
+            cv2.imshow("PBL4 - Traffic Monitor AI (YOLO11n + ViT Helmet)", frame)
+            print("\n🖥️ Đang hiện cửa sổ kết quả (Bấm phím bất kỳ trên cửa sổ ảnh để thoát)...")
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+
+        vit_worker.running = False
+        if mqtt_client:
+            try:
+                mqtt_client.loop_stop()
+            except Exception:
+                pass
+        return
+
     cap = cv2.VideoCapture(source)
 
-    prev_positions = {} # Lưu tọa độ Y đáy xe: {tracker_id: bottom_y}
+    prev_positions = {}      # Lưu tọa độ mép trước (front Y): {tracker_id: front_y}
+    track_class_history = {} # Lưu lịch sử nhãn để ổn định lớp: {tracker_id: [classes]}
 
     fps_count = 0
     start_time = time.time()
@@ -200,13 +375,15 @@ def main():
     print("   + Bấm phím 'g': Bật lại Đèn XANH (lưu thông bình thường)")
     print("   + Bấm phím 'q': Thoát chương trình\n")
 
-    global latest_jpeg
-
     while True:
         ret, frame = cap.read()
         if not ret:
             if isinstance(source, str) and os.path.exists(source):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                tracker = ByteTrackerManager()
+                prev_positions.clear()
+                track_class_history.clear()
+                vs.reset_tracking_state()
                 continue
             print("Đã hết video hoặc không thể đọc camera.")
             break
@@ -216,95 +393,127 @@ def main():
             scale = 720 / frame.shape[0]
             frame = cv2.resize(frame, (int(frame.shape[1] * scale), 720))
 
+        # Lưu bản copy sạch (không bị vẽ chữ/vạch đè lên) để làm bằng chứng vi phạm
+        clean_frame = frame.copy()
+
         h, w = frame.shape[:2]
         stream_metrics["width"] = w
         stream_metrics["height"] = h
         stop_line_y = int(h * 0.65) # Vạch dừng nằm ở 65% chiều cao khung hình
 
-        # Nhận diện xe với Detector đã chọn
+        # Nhận diện xe với Detector
         detections = detector.detect(frame)
 
         # Cập nhật bám đuôi với ByteTrack
         tracked_objects = tracker.update(detections)
 
-        # Vẽ Vùng Vạch Dừng quy định (Stop Zone 50px)
-        if vs.current_traffic_light == "RED":
-            zone_color = (0, 0, 255)      # Đỏ (BGR)
-            zone_label = f"VACH DUNG - DEN DO (Y={stop_line_y})"
-        elif vs.current_traffic_light == "YELLOW":
-            zone_color = (0, 255, 255)    # Vàng chói (BGR: B=0, G=255, R=255)
-            zone_label = f"VACH DUNG - DEN VANG (Y={stop_line_y})"
-        else:
-            zone_color = (0, 255, 0)      # Xanh lá (BGR)
-            zone_label = f"VACH DUNG - DEN XANH (Y={stop_line_y})"
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, stop_line_y - 25), (w, stop_line_y + 25), zone_color, -1)
-        cv2.addWeighted(overlay, 0.28, frame, 0.72, 0, frame)
-        cv2.line(frame, (0, stop_line_y), (w, stop_line_y), zone_color, 2)
-        cv2.putText(
-            frame, 
-            zone_label, 
-            (10, stop_line_y - 8), 
-            cv2.FONT_HERSHEY_SIMPLEX, 0.45, zone_color, 2
-        )
+        # 1. Vẽ Vạch Dừng - Gọn gàng mảnh 2px, không vẽ khối mờ che mặt đường
+        line_color = (0, 0, 255) if vs.current_traffic_light == "RED" else (0, 200, 0)
+        cv2.line(frame, (0, stop_line_y), (w, stop_line_y), line_color, 2)
+        cv2.putText(frame, "VACH DUNG", (10, stop_line_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, line_color, 1)
+
+        # 2. Xác định người ngồi trên xe máy (Riders)
+        is_standalone = args.standalone or isinstance(source, int)
+        riders_map = find_riders(tracked_objects, is_standalone=is_standalone)
+
+        active_tr_ids = set()
 
         # Duyệt qua từng đối tượng đang được theo dõi
         for obj in tracked_objects:
             x1, y1, x2, y2 = map(int, obj["box"])
             tr_id = obj["tracker_id"]
-            cls_name = obj["class_name"]
+            raw_cls = obj["class_name"]
             conf = obj["score"]
-            curr_bottom_y = y2
+            active_tr_ids.add(tr_id)
 
-            # A. KIỂM TRA LỖI VƯỢT ĐÈN ĐỎ & ĐẾM LƯU LƯỢNG XE QUA NGÃ TƯ THỰC TẾ
-            is_violating_red_light = False
-            if tr_id in prev_positions:
-                prev_bottom_y = prev_positions[tr_id]
-                is_violating_red_light = check_red_light_violation(
-                    tr_id, prev_bottom_y, curr_bottom_y, frame, cls_name, conf, stop_line_y=stop_line_y
-                )
-                # Đếm số lượng xe thực tế lưu thông qua ngã tư và đồng bộ về database
-                check_traffic_flow(
-                    tr_id, prev_bottom_y, curr_bottom_y, cls_name, stop_line_y=stop_line_y
-                )
-            prev_positions[tr_id] = curr_bottom_y
+            # ỔN ĐỊNH LỚP (Class Stabilization): Tránh hiện tượng nhấp nháy khi YOLO đổi qua lại giữa person và motorcycle
+            if tr_id not in track_class_history:
+                track_class_history[tr_id] = []
+            track_class_history[tr_id].append(raw_cls)
+            if len(track_class_history[tr_id]) > 20:
+                track_class_history[tr_id].pop(0)
 
-            # B. KIỂM TRA MŨ BẢO HIỂM CHO XE MÁY / NGƯỜI
-            is_violating_helmet = vit_worker.get_status(tr_id)
-            if not is_violating_helmet and cls_name in ["person", "motorcycle"]:
-                head_h = max(10, int((y2 - y1) * 0.35))
-                head_crop = frame[max(0, y1):min(h, y1 + head_h), max(0, x1):min(w, x2)]
-                
-                if head_crop.size > 0 and head_crop.shape[0] >= 15 and head_crop.shape[1] >= 15:
-                    vit_worker.submit(tr_id, head_crop, frame)
-
-            # C. VẼ BOUNDING BOX VÀ NHÃN HIỂN THỊ
-            if is_violating_red_light:
-                box_color = (0, 0, 255) # Đỏ rực báo động vượt đèn đỏ
-                label = f"[VUOT DEN] #{tr_id}"
-            elif is_violating_helmet:
-                box_color = (0, 0, 255) # Đỏ cảnh báo không đội mũ
-                label = f"[KO MU] #{tr_id}"
-            elif cls_name == "person":
-                box_color = (0, 255, 255) # Vàng cho người
-                label = f"Nguoi #{tr_id}"
+            history = track_class_history[tr_id]
+            if "motorcycle" in history:
+                cls_name = "motorcycle"
+            elif "truck" in history:
+                cls_name = "truck"
+            elif "bus" in history:
+                cls_name = "bus"
+            elif "car" in history:
+                cls_name = "car"
             else:
-                box_color = (255, 200, 0) # Xanh dương nhạt cho xe
-                label = f"{cls_name.upper()} #{tr_id}"
+                cls_name = max(set(history), key=history.count)
 
-            # Vẽ khung viền xe
-            box_thick = 3 if is_violating_red_light else 2
-            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, box_thick)
+            # Tính tọa độ mép trước (Leading Edge / Front Bumper) của phương tiện
+            # Chiều xe đi lên (Y giảm dần như traffic2.mp4): mép trước là y1 (đỉnh trên của box)
+            # Chiều xe đi xuống (Y tăng dần): mép trước là y2 (đáy dưới của box)
+            is_moving_up = (tr_id in prev_positions and y1 < prev_positions[tr_id]) or (y2 >= stop_line_y)
+            curr_front_y = y1 if is_moving_up else y2
+            prev_front_y = prev_positions.get(tr_id, curr_front_y)
 
-            # Vẽ nền chữ nổi (Text Badge) giúp chữ đọc cực rõ
-            font_scale = 0.4
-            (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
-            badge_y = max(th + 6, y1)
-            cv2.rectangle(frame, (x1, badge_y - th - 4), (x1 + tw + 4, badge_y + 2), box_color, -1)
-            text_color = (255, 255, 255) if (is_violating_red_light or is_violating_helmet) else (0, 0, 0)
-            cv2.putText(frame, label, (x1 + 2, badge_y - 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
+            # A. KIỂM TRA LỖI VƯỢT ĐÈN ĐỎ & LƯU LƯỢNG XE (bắt ngay lập tức khi đầu xe chạm vạch)
+            is_violating_red_light = check_red_light_violation(
+                tr_id, prev_front_y, curr_front_y, clean_frame, cls_name, conf, stop_line_y=stop_line_y, box=obj["box"]
+            )
+            if tr_id in prev_positions:
+                check_traffic_flow(
+                    tr_id, prev_front_y, curr_front_y, cls_name, stop_line_y=stop_line_y
+                )
+            prev_positions[tr_id] = curr_front_y
 
-        # Hiển thị thông tin hệ thống (FPS & Trạng thái đèn)
+            # B. KIỂM TRA MŨ BẢO HIỂM (Chỉ kiểm tra người điều khiển xe máy)
+            if raw_cls == "person" or cls_name == "motorcycle":
+                moto_id = riders_map.get(tr_id, tr_id if cls_name == "motorcycle" else None)
+                cx = (x1 + x2) // 2
+                hw = int((x2 - x1) * 0.55)
+                # Cắt từ clean_frame để tránh dính nét vẽ/vạch dừng
+                head_crop = clean_frame[max(0, y1):min(h, y1 + int((y2 - y1) * 0.28)), max(0, cx - hw // 2):min(w, cx + hw // 2)]
+                
+                # Ngưỡng tối thiểu 14px phù hợp với kích thước thực tế của đầu người trong video giao thông
+                if head_crop.size > 0 and head_crop.shape[0] >= 14 and head_crop.shape[1] >= 14:
+                    vit_worker.submit(tr_id, head_crop, clean_frame, moto_id=moto_id, box=obj["box"])
+
+            is_no_helmet, h_conf, _ = vit_worker.get_status(tr_id)
+
+            # C. VẼ BOUNDING BOX - Ổn định, dày 2px, nhãn có nền màu, tuyệt đối KHÔNG NHẤP NHÁY
+            if is_violating_red_light:
+                # Vi phạm vượt đèn đỏ: Viền đỏ 2px + nền nhãn đỏ nổi bật
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                label = f"[VUOT DEN] #{tr_id}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                by = max(th + 4, y1)
+                cv2.rectangle(frame, (x1, by - th - 4), (x1 + tw + 6, by + 2), (0, 0, 255), -1)
+                cv2.putText(frame, label, (x1 + 3, by - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            elif is_no_helmet:
+                # Vi phạm không đội mũ: Viền đỏ 2px + nền nhãn đỏ nổi bật
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                label = f"[KO MU] #{tr_id}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                by = max(th + 4, y1)
+                cv2.rectangle(frame, (x1, by - th - 4), (x1 + tw + 6, by + 2), (0, 0, 255), -1)
+                cv2.putText(frame, label, (x1 + 3, by - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            else:
+                # Phương tiện bình thường: Giữ viền Cyan-Amber liên tục trên mọi frame (chống biến mất/nhấp nháy)
+                box_c = (220, 160, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), box_c, 2)
+                display_label = "rider" if cls_name == "person" else cls_name
+                label = f"{display_label} #{tr_id}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+                by = max(th + 4, y1)
+                cv2.rectangle(frame, (x1, by - th - 4), (x1 + tw + 4, by + 2), box_c, -1)
+                cv2.putText(frame, label, (x1 + 2, by - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+
+        # D. DỌN DẸP BỘ NHỚ ĐỊNH KỲ (Tránh rò rỉ RAM)
+        if fps_count % 30 == 0:
+            vit_worker.cleanup_old_tracks(active_tr_ids)
+            stale_keys = [k for k in prev_positions if k not in active_tr_ids]
+            if len(stale_keys) > 40:
+                for k in stale_keys[:20]:
+                    prev_positions.pop(k, None)
+                    track_class_history.pop(k, None)
+
+        # Hiển thị FPS và Đèn trên góc trái - Gọn gàng tinh tế
         fps_count += 1
         if time.time() - start_time >= 1.0:
             fps_display = fps_count
@@ -312,30 +521,10 @@ def main():
             start_time = time.time()
             stream_metrics["fps"] = fps_display
 
-        # Badge trạng thái đèn và mô hình trên HUD
-        if vs.current_traffic_light == "RED":
-            light_badge_color = (0, 0, 255)      # Đỏ
-        elif vs.current_traffic_light == "YELLOW":
-            light_badge_color = (0, 215, 255)    # Vàng
-        else:
-            light_badge_color = (0, 200, 0)      # Xanh
-        cv2.putText(frame, f"DEN: {vs.current_traffic_light}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, light_badge_color, 2)
-        cv2.putText(frame, f"FPS: {fps_display}", (w - 75, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(frame, f"AI: {mode_label}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
-
-        # Banner cảnh báo và thống kê vi phạm trên HUD
-        total_viols = len(vs.violating_vehicles)
-        viol_bg = (0, 0, 200) if total_viols > 0 else (30, 30, 30)
-        cv2.rectangle(frame, (8, 65), (w - 8, 95), viol_bg, -1)
-        cv2.rectangle(frame, (8, 65), (w - 8, 95), (200, 200, 200), 1)
-
-        now_ts = time.time()
-        active_viols = [t_id for t_id, t_time in vs.reported_violations.items() if now_ts - t_time < 4.0]
-        if active_viols:
-            banner_text = f"CANH BAO: XE #{active_viols[-1]} VUOT DEN DO!"
-        else:
-            banner_text = f"VI PHAM: {total_viols} | DA QUA: {len(vs.passed_vehicles)}"
-        cv2.putText(frame, banner_text, (14, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        light_color = (0, 0, 255) if vs.current_traffic_light == "RED" else (0, 200, 0)
+        cv2.circle(frame, (16, 20), 7, light_color, -1)
+        cv2.circle(frame, (16, 20), 8, (255, 255, 255), 1)
+        cv2.putText(frame, f"DEN: {vs.current_traffic_light}  |  FPS: {fps_display}", (32, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
         # Cập nhật buffer phát sóng trực tiếp qua mạng HTTP MJPEG
         ret_enc, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -346,7 +535,7 @@ def main():
         # Hiển thị cửa sổ OpenCV (nếu bật GUI)
         if not args.no_gui:
             try:
-                cv2.imshow("PBL4 - Traffic Monitor AI (Dual-Mode: YOLO11 / Deformable DETR)", frame)
+                cv2.imshow("PBL4 - Traffic Monitor AI (YOLO11n + ViT Helmet)", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break

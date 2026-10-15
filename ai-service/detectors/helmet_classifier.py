@@ -5,30 +5,36 @@ from PIL import Image
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import config
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_MODEL_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "models", "vit_helmet_best"))
+
 class HelmetClassifier:
-    def __init__(self, model_dir="models/vit_helmet_best"):
+    def __init__(self, model_dir=None):
         """
         Khởi tạo bộ phân loại Mũ bảo hiểm Vision Transformer (ViT)
         - model_dir: Thư mục chứa trọng số mô hình sau khi train trên Google Colab
         """
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.history = {} # Lưu lịch sử đếm frame: {tracker_id: số_frame_không_đội_mũ}
-        self.model_dir = model_dir
+        self.model_dir = model_dir or DEFAULT_MODEL_DIR
         self.is_real_model = False
 
-        if os.path.exists(model_dir) and (os.path.exists(os.path.join(model_dir, "model.safetensors")) or os.path.exists(os.path.join(model_dir, "pytorch_model.bin"))):
+        if os.path.exists(self.model_dir) and (
+            os.path.exists(os.path.join(self.model_dir, "model.safetensors")) or 
+            os.path.exists(os.path.join(self.model_dir, "pytorch_model.bin"))
+        ):
             try:
                 from transformers import ViTForImageClassification, ViTImageProcessor
-                print(f"[ViT] Dang nap mo hinh mu bao hiem tu: {model_dir}...")
-                self.processor = ViTImageProcessor.from_pretrained(model_dir)
-                self.model = ViTForImageClassification.from_pretrained(model_dir).to(self.device)
+                print(f"[ViT] Đang nạp mô hình mũ bảo hiểm từ: {self.model_dir}...")
+                self.processor = ViTImageProcessor.from_pretrained(self.model_dir)
+                self.model = ViTForImageClassification.from_pretrained(self.model_dir).to(self.device)
                 self.model.eval()
                 self.is_real_model = True
-                print(f"[ViT] Mo hinh ViT san sang tren thiet bi: {self.device.upper()}!")
+                print(f"[ViT] Mô hình ViT sẵn sàng trên thiết bị: {self.device.upper()}!")
             except Exception as e:
-                print(f"[ViT Warning] Khong the tai ViT model: {e}. Dung Fallback mode.")
+                print(f"[ViT Warning] Không thể nạp ViT model: {e}. Dùng Fallback mode.")
         else:
-            print(f"[ViT Info] Chua tim thay model weights tai '{model_dir}'. Dung Fallback mode.")
+            print(f"[ViT Warning] Không tìm thấy weights tại '{self.model_dir}'. Dùng Fallback mode.")
 
     def predict_head(self, head_crop_bgr):
         """
@@ -74,13 +80,19 @@ class HelmetClassifier:
             self.history[tracker_id] = 0
 
         if is_no_helmet:
-            self.history[tracker_id] += 1
+            self.history[tracker_id] = min(10, self.history[tracker_id] + 1)
         else:
-            self.history[tracker_id] = max(0, self.history[tracker_id] - 1)
+            self.history[tracker_id] = max(0, self.history[tracker_id] - 2)
 
-        # Kiểm tra ngưỡng 5 frame liên tiếp
-        required_frames = getattr(config, "NO_HELMET_FRAMES_REQUIRED", 5)
+        # Kiểm tra ngưỡng frame liên tiếp từ config (mặc định 3 frame)
+        required_frames = getattr(config, "NO_HELMET_FRAMES_REQUIRED", 3)
         if self.history[tracker_id] >= required_frames:
             return True, conf
 
         return False, conf
+
+    def cleanup_history(self, active_tr_ids):
+        """Xóa lịch sử của các xe đã biến mất để tránh rò rỉ RAM"""
+        stale = [tid for tid in self.history if tid not in active_tr_ids]
+        for tid in stale:
+            self.history.pop(tid, None)

@@ -1,4 +1,4 @@
-import os, sys, cv2, json, base64, requests, time
+import os, sys, cv2, json, base64, requests, time, threading
 import paho.mqtt.client as mqtt
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -28,6 +28,12 @@ def set_manual_light(new_light):
         return False
     current_traffic_light = new_light
     print(f"🛠️ [TEST NỘI BỘ TẠI NHÀ] Đã đổi đèn sang {new_light} (Chỉ áp dụng khi vắng bo ESP32)")
+    return True
+
+def reset_to_auto_esp32():
+    """Khôi phục lại chế độ tự động nhận diện tín hiệu từ ESP32"""
+    global current_traffic_light
+    print("🔄 [CHUYỂN ĐỔI] Đã bật chế độ tự động nhận diện theo ESP32 / MQTT.")
     return True
 
 # Lưu lịch sử vi phạm để không gửi trùng lặp nhiều lần cho cùng 1 xe: {tracker_id: timestamp_violation}
@@ -93,7 +99,7 @@ import threading
 
 def _async_post(url, payload):
     try:
-        res = requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=25)
         if res.status_code in [200, 201]:
             data = res.json()
             print(f"\n✅ [AI -> BACKEND] Đã báo cáo vi phạm lên Server thành công! ID #{data.get('id')} | Mức phạt: {data.get('fineAmount')}")
@@ -126,9 +132,43 @@ def send_violation_to_backend(frame, viol_type, veh_type, conf, camera_id=1):
     threading.Thread(target=_async_post, args=(url, payload), daemon=True).start()
 
 
-# Lưu danh sách ID các xe đã vi phạm đèn đỏ để giữ hộp màu đỏ vĩnh viễn trên màn hình
-violating_vehicles = set()
+# Lưu danh sách ID các xe đã vi phạm đèn đỏ kèm tọa độ box: {tracker_id: {"timestamp": float, "box": list}}
+violating_vehicles = {}
 passed_vehicles = set()
+
+def reset_tracking_state():
+    """Xóa sạch bộ nhớ vi phạm và lưu lượng khi tua lại video (loop) hoặc đổi camera"""
+    global violating_vehicles, passed_vehicles, reported_violations
+    violating_vehicles.clear()
+    passed_vehicles.clear()
+    reported_violations.clear()
+    print("🔄 [RESET BỘ NHỚ] Đã làm mới toàn bộ danh sách vi phạm & lưu lượng xe cho chu kỳ mới.")
+
+def _box_iou(boxA, boxB):
+    """Tính độ trùng lặp IoU giữa 2 bounding box"""
+    if boxA is None or boxB is None or len(boxA) < 4 or len(boxB) < 4:
+        return 0.0
+    xa = max(boxA[0], boxB[0])
+    ya = max(boxA[1], boxB[1])
+    xb = min(boxA[2], boxB[2])
+    yb = min(boxA[3], boxB[3])
+    inter = max(0.0, xb - xa) * max(0.0, yb - ya)
+    areaA = max(1.0, (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]))
+    areaB = max(1.0, (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]))
+    union = areaA + areaB - inter
+    return inter / max(1.0, union)
+
+def check_line_crossing(prev_y, curr_y, stop_line_y):
+    """
+    Kiểm tra mép trước (đầu xe) cắt qua vạch dừng theo cả 2 chiều:
+    - Chiều đi lên (Y giảm - từ đáy lên ngã tư như traffic2.mp4): prev_y >= stop_line_y và curr_y < stop_line_y
+    - Chiều đi xuống (Y tăng - từ ngã tư xuống phía dưới): prev_y <= stop_line_y và curr_y > stop_line_y
+    """
+    if prev_y is None or curr_y is None:
+        return False
+    crossed_up = (prev_y >= stop_line_y and curr_y < stop_line_y)
+    crossed_down = (prev_y <= stop_line_y and curr_y > stop_line_y)
+    return crossed_up or crossed_down
 
 def send_traffic_flow_to_backend(count=1, vehicle_type="car", camera_id=1):
     """Gửi số lượt phương tiện lưu thông thực tế về Backend Spring Boot"""
@@ -146,66 +186,81 @@ def _async_post_flow(url, payload):
     except Exception:
         pass
 
-def check_traffic_flow(tracker_id, prev_bottom_y, curr_bottom_y, class_name, stop_line_y=None):
+def check_traffic_flow(tracker_id, prev_front_y, curr_front_y, class_name, stop_line_y=None):
     """
-    Đếm lưu lượng phương tiện thực tế khi xe cắt qua vạch ngã tư
+    Đếm lưu lượng phương tiện cơ giới thực tế khi đầu xe cắt qua vạch ngã tư
     """
     global passed_vehicles
+    TRAFFIC_CLASSES = {"car", "motorcycle", "bus", "truck", "person", "rider"}
+    if class_name not in TRAFFIC_CLASSES:
+        return False
+
     if tracker_id in passed_vehicles:
         return False
 
     if stop_line_y is None:
         stop_line_y = getattr(config, "STOP_LINE_Y", 468)
 
-    zone_top = stop_line_y - 30
-    zone_bottom = stop_line_y + 30
-
-    crossed = (prev_bottom_y <= stop_line_y and curr_bottom_y > stop_line_y) or \
-              (prev_bottom_y >= stop_line_y and curr_bottom_y < stop_line_y) or \
-              (zone_top <= curr_bottom_y <= zone_bottom)
+    crossed = check_line_crossing(prev_front_y, curr_front_y, stop_line_y)
 
     if crossed:
         passed_vehicles.add(tracker_id)
         veh_type = "car" if class_name in ["car", "bus", "truck"] else "motorcycle"
         send_traffic_flow_to_backend(count=1, vehicle_type=veh_type)
-        print(f"📊 [LƯU LƯỢNG XE THẬT] Xe #{tracker_id} ({veh_type.upper()}) vừa qua nút giao. Tổng hôm nay: {len(passed_vehicles)}")
+        print(f"📊 [LƯU LƯỢNG XE] Xe #{tracker_id} ({veh_type.upper()}) qua ngã tư. Tổng: {len(passed_vehicles)}")
         return True
 
     return False
 
-def check_red_light_violation(tracker_id, prev_bottom_y, curr_bottom_y, frame, class_name, conf, stop_line_y=None):
+def check_red_light_violation(tracker_id, prev_front_y, curr_front_y, frame, class_name, conf, stop_line_y=None, box=None):
     """
-    Kiểm tra xe có vượt qua vạch dừng khi đèn ĐỎ hay không:
-    - Áp dụng cơ chế Vùng Vạch Dừng (Stop Zone 50px) chống sót xe nhảy frame.
-    - Giữ trạng thái vi phạm vĩnh viễn cho đến khi xe chạy khuất màn hình.
+    Kiểm tra xe cơ giới (ô tô, xe máy, xe tải, người lái xe) vượt đèn đỏ theo mép đầu xe.
+    Tạo ảnh bằng chứng sạch (clean evidence) gửi lên Backend.
     """
     global current_traffic_light, reported_violations, violating_vehicles
+
+    TRAFFIC_CLASSES = {"car", "motorcycle", "bus", "truck", "person", "rider"}
+    if class_name not in TRAFFIC_CLASSES:
+        return False
 
     if stop_line_y is None:
         stop_line_y = getattr(config, "STOP_LINE_Y", 468)
 
-    # 1. Nếu xe này đã từng bị phát hiện vượt đèn đỏ -> Giữ nguyên hộp đỏ vĩnh viễn
+    now = time.time()
+
+    # 1. Nếu xe này đã được xác nhận vi phạm: tiếp tục duy trì trạng thái (chống nhấp nháy 100%)
     if tracker_id in violating_vehicles:
+        violating_vehicles[tracker_id]["timestamp"] = now
+        if box is not None:
+            violating_vehicles[tracker_id]["box"] = box
         return True
 
-    # 2. Vùng Vạch Dừng nhạy bén (dày 50px: từ stop_line_y - 25 đến stop_line_y + 25)
-    zone_top = stop_line_y - 25
-    zone_bottom = stop_line_y + 25
+    # 2. Cơ chế Kế thừa vi phạm: Nếu ByteTrack đổi tracker_id khi xe đang vượt, đối chiếu IoU với xe vừa vi phạm
+    if box is not None:
+        for v_id, v_data in list(violating_vehicles.items()):
+            if (now - v_data["timestamp"]) < 6.0: # Trong vòng 6s từ lúc vượt
+                if _box_iou(box, v_data["box"]) > 0.35:
+                    violating_vehicles[tracker_id] = {"timestamp": now, "box": box}
+                    return True
 
-    crossed_down = (prev_bottom_y <= stop_line_y and curr_bottom_y > stop_line_y)
-    crossed_up = (prev_bottom_y >= stop_line_y and curr_bottom_y < stop_line_y)
-    in_zone = (zone_top <= curr_bottom_y <= zone_bottom and curr_bottom_y < prev_bottom_y)
+    # 3. Kiểm tra mép đầu xe cắt qua vạch dừng khi đèn ĐỎ
+    crossed = check_line_crossing(prev_front_y, curr_front_y, stop_line_y)
 
-    if (crossed_down or crossed_up or in_zone):
-        # 3. Chỉ phạt khi đèn đang ĐỎ
-        if current_traffic_light == "RED":
-            violating_vehicles.add(tracker_id)
-            reported_violations[tracker_id] = time.time()
-            print(f"\n🚨 [AI PHÁT HIỆN VI PHẠM] Xe #{tracker_id} ({class_name.upper()}) VƯỢT ĐÈN ĐỎ tại vạch Y={stop_line_y}!")
-            
-            veh_type = "CAR" if class_name in ["car", "bus", "truck"] else "MOTORCYCLE"
-            send_violation_to_backend(frame, "RED_LIGHT_CROSS", veh_type, conf)
-            return True
+    if crossed and current_traffic_light == "RED":
+        violating_vehicles[tracker_id] = {"timestamp": now, "box": box or [0, 0, 0, 0]}
+        reported_violations[tracker_id] = now
+        veh_type = "CAR" if class_name in ["car", "bus", "truck"] else "MOTORCYCLE"
+        print(f"\n🚨 [AI PHÁT HIỆN VI PHẠM] Xe #{tracker_id} ({veh_type}) VƯỢT ĐÈN ĐỎ tại vạch Y={stop_line_y}!")
+
+        # Tạo ảnh bằng chứng sạch chỉ khoanh khung đỏ quanh xe vi phạm
+        evidence = frame.copy()
+        if box is not None:
+            bx1, by1, bx2, by2 = map(int, box)
+            cv2.rectangle(evidence, (bx1, by1), (bx2, by2), (0, 0, 255), 2)
+            cv2.putText(evidence, f"VUOT DEN DO #{tracker_id}", (bx1, max(20, by1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+        send_violation_to_backend(evidence, "RED_LIGHT_CROSS", veh_type, conf)
+        return True
 
     return False
 
