@@ -280,7 +280,7 @@ export default function ViolationModal({ violation, onClose, onConfirm, onDismis
                     {/* KHUNG ẢNH BẰNG CHỨNG: CĂN GIỮA 100%, TO RÕ RÀNG & CÓ THỂ BẤM ĐỂ PHÓNG TO */}
                     <div 
                         onClick={openLightbox}
-                        title="Bấm vào để xem ảnh toàn màn hình và phóng to/thu nhỏ soi biển số"
+                        title="Bấm vào để xem ảnh toàn màn hình và phóng to/thu nhỏ soi ảnh bằng chứng"
                         style={{
                             borderRadius: '10px',
                             overflow: 'hidden',
@@ -675,7 +675,7 @@ export default function ViolationModal({ violation, onClose, onConfirm, onDismis
                             border: '1px solid rgba(255, 255, 255, 0.1)',
                             pointerEvents: 'none'
                         }}>
-                            {zoomScale > 1 ? '🖱️ Kéo chuột để di chuyển vùng soi biển số · Cuộn chuột để thu phóng' : '🖱️ Cuộn chuột hoặc bấm nút [+] để phóng đại soi biển số'}
+                            {zoomScale > 1 ? '🖱️ Kéo chuột để di chuyển vùng soi chi tiết · Cuộn chuột để thu phóng' : '🖱️ Cuộn chuột hoặc bấm nút [+] để phóng đại soi chi tiết'}
                         </div>
                     </div>
                 </div>

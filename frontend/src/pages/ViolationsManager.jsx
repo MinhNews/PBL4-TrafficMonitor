@@ -50,8 +50,8 @@ export default function ViolationsManager({ onOpenModal }) {
         const matchStatus = statusFilter === 'ALL' || v.status === statusFilter;
         const q = searchTerm.trim().toLowerCase();
         const matchSearch = !q || String(v.id).includes(q)
-            || (v.licensePlate || '').toLowerCase().includes(q)
-            || (v.cameraName || '').toLowerCase().includes(q);
+            || (v.cameraName || '').toLowerCase().includes(q)
+            || (v.vehicleType || '').toLowerCase().includes(q);
         return matchType && matchStatus && matchSearch;
     });
 
@@ -111,7 +111,7 @@ export default function ViolationsManager({ onOpenModal }) {
                     <input
                         className="input-field"
                         style={{ paddingLeft: '32px', height: '36px', fontSize: '12.5px' }}
-                        placeholder="Tìm theo ID, biển số, camera..."
+                        placeholder="Tìm theo ID, loại xe, camera..."
                         value={searchTerm}
                         onChange={e => setSearchTerm(e.target.value)}
                     />
@@ -171,7 +171,6 @@ export default function ViolationsManager({ onOpenModal }) {
                                     <th>Thời Gian</th>
                                     <th>Loại Vi Phạm</th>
                                     <th>Phương Tiện</th>
-                                    <th>Biển Số</th>
                                     <th>Độ Tin Cậy</th>
                                     <th>Camera</th>
                                     <th>Trạng Thái</th>
@@ -222,12 +221,7 @@ export default function ViolationsManager({ onOpenModal }) {
                                                     {(v.vehicleType || 'N/A').toLowerCase()}
                                                 </span>
                                             </td>
-                                            <td onClick={() => onOpenModal?.(v)}>
-                                                {v.licensePlate
-                                                    ? <span style={{ fontFamily: 'var(--mono)', fontSize: '12px', color: '#0f172a', background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '2px 7px', borderRadius: '4px', fontWeight: 600 }}>{v.licensePlate}</span>
-                                                    : <span style={{ color: 'var(--t-muted)', fontSize: '12px' }}>—</span>
-                                                }
-                                            </td>
+
                                             <td onClick={() => onOpenModal?.(v)}>
                                                 {v.confidence != null ? (() => {
                                                     const confPercent = Math.round(v.confidence <= 1 ? v.confidence * 100 : v.confidence);

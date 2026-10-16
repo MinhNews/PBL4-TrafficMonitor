@@ -19,3 +19,17 @@ target/
 HUONG_DAN_DEMO_KHOA.md
 BAO_CAO_TIEN_DO_TUAN_7.md
 .claude/
+ai-service/backup_legacy/
+ai-service/tools/debug_frames/
+ai-service/tools/debug_head_crops/
+ai-service/tools/frame_445_analysis/
+ai-service/tools/inspect_kodoimu/
+ai-service/tools/inspect_kodoimu_crops/
+ai-service/tools/kodoimu_verified_frames/
+ai-service/tools/test_riders_heads/
+ai-service/tools/visualize_crops/
+ai-service/tools/*.jpg
+*.jpg
+*.png
+!frontend/src/assets/*
+!docs/**
