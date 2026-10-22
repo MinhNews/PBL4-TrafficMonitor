@@ -1,12 +1,22 @@
-torch==2.1.0
-torchvision==0.16.0
-transformers==4.35.0
-timm==0.9.10
-opencv-python==4.8.1.78
-numpy==1.24.3
-flask==3.0.0
-requests==2.31.0
-paho-mqtt==1.6.1
-supervision==0.16.0
-Pillow==10.0.1
-ultralytics
+# Phiên bản khoá theo môi trường chạy thực tế (ai-service/pbl4_env).
+# Lưu ý: paho-mqtt PHẢI >= 2.0 vì services/mqtt_service.py dùng CallbackAPIVersion.VERSION2.
+
+# --- Deep learning ---
+torch==2.14.0
+torchvision==0.29.0
+transformers==5.17.0
+timm==1.0.29
+ultralytics==8.4.161
+
+# --- Xử lý ảnh / tiện ích ---
+opencv-python==5.0.0.93
+numpy==2.5.3
+Pillow==12.3.0
+
+# --- Web stream & networking ---
+flask==3.1.3
+requests==2.34.2
+paho-mqtt==2.1.0
+
+# --- Multi-object tracking ---
+supervision==0.30.3

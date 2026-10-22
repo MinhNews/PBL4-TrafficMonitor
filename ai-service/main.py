@@ -4,9 +4,11 @@ import numpy as np
 # Thêm thư mục gốc ai-service vào path
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 import config
+import runtime_config
 
 from detectors.yolo_detector import YoloDetector
 from detectors.helmet_classifier import HelmetClassifier
+from core.camera_manager import CameraManager
 from core.tracker_manager import TrafficTrackerManager
 from core.violation_engine import ViolationEngine
 from services.backend_service import BackendService
@@ -17,20 +19,34 @@ from services.stream_service import LiveStreamServer
 def main():
     print("=" * 68)
     print("🚦 HỆ THỐNG GIÁM SÁT GIAO THÔNG THÔNG MINH (PBL4 - NHÓM 3) 🚦")
-    print("   Kiến trúc: YOLO11n (Spatial) + ViT (Transformer) + ByteTrack")
+    print(f"   Kiến trúc: {config.YOLO_MODEL_NAME} (Spatial) + ViT (Transformer) + ByteTrack")
     print("=" * 68)
 
     # 1. Khởi tạo các tham số dòng lệnh
-    dataset_video = os.path.abspath(os.path.join(os.path.dirname(__file__), "dataset", "traffic2.mp4"))
-    default_source = dataset_video if os.path.exists(dataset_video) else "0"
-
     parser = argparse.ArgumentParser(description="PBL4 Traffic Monitor AI")
-    parser.add_argument("--source", default=default_source, help="Đường dẫn file video hoặc webcam index (mặc định: traffic2.mp4)")
+    parser.add_argument("--source", default=None,
+                        help="Chạy 1 nguồn duy nhất (ghi đè danh sách camera trong config.py) — dùng để test nhanh")
+    parser.add_argument("--camera", type=int, default=None,
+                        help="ID camera khởi động (mặc định: config.DEFAULT_CAMERA_ID)")
     parser.add_argument("--no-gui", action="store_true", help="Chạy chế độ headless không mở cửa sổ OpenCV")
     parser.add_argument("--standalone", action="store_true", help="Chế độ test cá nhân tại nhà (không yêu cầu xe máy)")
     args, _ = parser.parse_known_args()
 
-    source = int(args.source) if str(args.source).isdigit() else args.source
+    # C4: nguồn camera — mặc định lấy danh sách trong config.py, đổi camera trên Web không cần restart
+    if args.source:
+        cameras = [{
+            "id": getattr(config, "CAMERA_ID", 1),
+            "name": "Nguồn tùy chọn (--source)",
+            "source": args.source,
+        }]
+        initial_camera_id = cameras[0]["id"]
+        print(f"📷 [CAMERA] Chế độ 1 nguồn (--source): {args.source}")
+    else:
+        cameras = getattr(config, "CAMERAS", [])
+        initial_camera_id = args.camera or getattr(config, "DEFAULT_CAMERA_ID", 1)
+
+    camera_manager = CameraManager(cameras=cameras, initial_id=initial_camera_id)
+    source = camera_manager.active_source()
 
     # 2. Khởi tạo các Mô hình AI Cốt Lõi
     print("\n📦 [1/4] Khởi tạo các mô hình AI...")
@@ -40,22 +56,25 @@ def main():
     # 3. Khởi tạo các Dịch vụ Ngoại vi (Services)
     print("🌐 [2/4] Khởi tạo kết nối Backend Spring Boot & MQTT ESP32...")
     backend_service = BackendService()
+    backend_service.set_camera_id(camera_manager.active_id())
     mqtt_service = MqttTrafficLightService().start()
 
     # 4. Khởi tạo Tầng Lõi Nghiệp vụ (Core Engine)
     print("⚙️  [3/4] Khởi tạo động cơ xử lý vết và bắt vi phạm...")
+    runtime_config.load()  # C2: nạp vạch dừng / chiều xe đã chỉnh từ Web (nếu có)
     tracker_manager = TrafficTrackerManager()
     violation_engine = ViolationEngine(backend_service)
+    violation_engine.approach_direction = runtime_config.approach_direction()
     vit_worker = AsyncViTWorker(helmet_clf, violation_engine)
 
     # 5. Khởi chạy Máy chủ phát luồng Web (Port 5000)
     print("📡 [4/4] Khởi chạy máy chủ phát luồng Live Stream...")
-    stream_server = LiveStreamServer(mqtt_service, violation_engine).start()
+    stream_server = LiveStreamServer(mqtt_service, violation_engine, camera_manager=camera_manager).start()
 
     # =========================================================================
     # CHẾ ĐỘ TEST ẢNH TĨNH (.jpg, .png, .jpeg)
     # =========================================================================
-    is_image = isinstance(source, str) and os.path.isfile(source) and source.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.webp'))
+    is_image = camera_manager.active_is_image()
     if is_image:
         print(f"\n📸 [ẢNH TĨNH] Đang phân tích file ảnh: '{source}'...")
         frame = cv2.imread(source)
@@ -98,29 +117,60 @@ def main():
     # =========================================================================
     # CHẾ ĐỘ XỬ LÝ VIDEO / WEBCAM THỜI GIAN THỰC (30 FPS)
     # =========================================================================
-    cap = cv2.VideoCapture(source)
+    cap = camera_manager.open_active_capture()
+    if cap is None:
+        print(f"❌ Không mở được camera: {camera_manager.active_name()} ({source})")
+        mqtt_service.stop()
+        return
+
     frame_idx = 0 # C1: Biến đếm frame tăng đơn điệu không bị reset
     fps_count = 0
     fps_display = 0
     start_time = time.time()
 
+    def reset_session(reason):
+        """C4: đổi camera / video lặp lại -> xoá sạch trạng thái bám đuôi của phiên cũ."""
+        nonlocal fps_count, fps_display, start_time
+        tracker_manager.reset()
+        violation_engine.reset()
+        vit_worker.reset()
+        fps_count = 0
+        fps_display = 0
+        start_time = time.time()
+        print(f"🔄 [PHIÊN MỚI] {reason}")
+
     print("\n" + "-" * 68)
-    print("💡 HƯỚNG DẪN ĐIỀU KHIỂN BẰNG BÀN PHÍM:")
+    print("💡 HƯỚNG DẪN ĐIỀU KHIỂN:")
     print("   [r] Bật cưỡng bức Đèn ĐỎ (kiểm tra phạt vượt đèn đỏ)")
     print("   [y] Bật cưỡng bức Đèn VÀNG (giảm tốc)")
     print("   [g] Bật lại Đèn XANH (lưu thông bình thường)")
     print("   [q] Thoát chương trình")
+    print("   🎥 Đổi camera trên Web (Live Camera) — không cần restart AI")
+    cam = camera_manager.active_camera()
+    print(f"   Đang giám sát: {cam['name']} (id={cam['id']})")
     print("-" * 68 + "\n")
 
     while True:
+        # 0. C4: áp dụng yêu cầu đổi camera giữa hai frame (không tranh chấp với YOLO/ByteTrack)
+        pending_id = camera_manager.take_pending()
+        if pending_id is not None:
+            new_cap = camera_manager.open_capture(pending_id)
+            if new_cap is None:
+                print(f"❌ [CAMERA] Không mở được camera id={pending_id}, giữ nguyên camera hiện tại.")
+            else:
+                camera_manager.set_active(pending_id)
+                backend_service.set_camera_id(pending_id)
+                reset_session(f"Chuyển sang {camera_manager.active_name()}")
+                cap = new_cap
+                print(f"🎥 [CAMERA] Đang giám sát: {camera_manager.active_name()}")
+            continue
+
         ret, frame = cap.read()
         if not ret:
             # Tự động tua lại video lặp tuần hoàn (Seamless Loop)
-            if isinstance(source, str) and os.path.exists(source):
+            if camera_manager.active_is_looping():
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                tracker_manager.reset()
-                violation_engine.reset()
-                vit_worker.reset() # C2: Xóa sạch trạng thái ViT khi video tua lại loop
+                reset_session("Video lặp lại từ đầu")
                 continue
             print("Đã hết video hoặc không thể đọc camera.")
             break
@@ -135,17 +185,20 @@ def main():
         # Lưu bản copy sạch (không nét vẽ) để gửi Backend làm bằng chứng vi phạm
         clean_frame = frame.copy()
         h, w = frame.shape[:2]
-        stop_line_y = int(h * getattr(config, "STOP_LINE_RATIO", 0.65)) # D1: Dùng STOP_LINE_RATIO
+        # C2: Tỉ lệ vạch dừng đọc từ runtime_config -> chỉnh được trên Web, không cần restart
+        stop_line_y = int(h * runtime_config.stop_line_ratio())
 
         # 1. Phát hiện đối tượng (YOLO11n) & Cập nhật bám đuôi (ByteTrack)
         detections = detector.detect(frame)
         entities = tracker_manager.update(detections, stop_line_y=stop_line_y, is_standalone=args.standalone)
 
         # 2. Vẽ Vạch Dừng giao thông (Đỏ khi đèn Đỏ, Xanh khi đèn Xanh)
+        # C4: nút bật/tắt chỉ ảnh hưởng phần VẼ; logic stop_line_y bên dưới giữ nguyên
         current_light = mqtt_service.current_light
-        line_color = (0, 0, 255) if current_light == "RED" else (0, 200, 0)
-        cv2.line(frame, (0, stop_line_y), (w, stop_line_y), line_color, 2)
-        cv2.putText(frame, "VACH DUNG", (10, stop_line_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, line_color, 1)
+        if runtime_config.stop_line_visible():
+            line_color = (0, 0, 255) if current_light == "RED" else (0, 200, 0)
+            cv2.line(frame, (0, stop_line_y), (w, stop_line_y), line_color, 2)
+            cv2.putText(frame, "VACH DUNG", (10, stop_line_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, line_color, 1)
 
         active_tr_ids = set()
 
@@ -165,7 +218,7 @@ def main():
                 hw = int((x2 - x1) * 0.55)
                 head_crop = clean_frame[max(0, y1):min(h, y1 + int((y2 - y1) * 0.32)), max(0, cx - hw // 2):min(w, cx + hw // 2)]
                 if head_crop.size > 0 and head_crop.shape[0] >= 18 and head_crop.shape[1] >= 18:
-                    vit_worker.submit(entity, head_crop, clean_frame)
+                    vit_worker.submit(entity, head_crop, clean_frame, camera_manager.active_id())
 
             # Cập nhật kết quả phân loại từ ViT
             is_no_h, h_conf, has_res = vit_worker.get_status(entity.id)
@@ -195,6 +248,9 @@ def main():
         fps_count += 1
         if frame_idx % 30 == 0:
             vit_worker.cleanup_old_tracks(active_tr_ids)
+            # B1: Dọn bộ nhớ vi phạm/lưu lượng của các xe đã khuất khỏi khung hình.
+            # Chạy camera thật nhiều giờ mà không có bước này thì dict sẽ phình vô hạn.
+            violation_engine.prune_stale()
 
 
         # 5. Tính toán và hiển thị HUD (FPS, Trạng thái đèn)
@@ -215,7 +271,7 @@ def main():
         # 7. Hiển thị cửa sổ OpenCV nếu bật GUI
         if not args.no_gui:
             try:
-                cv2.imshow("PBL4 - Traffic Monitor AI (YOLO11n + ViT Helmet)", frame)
+                cv2.imshow(f"PBL4 - Traffic Monitor AI ({config.YOLO_MODEL_NAME} + ViT Helmet)", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
@@ -236,7 +292,7 @@ def main():
     print("\n🛑 Đang giải phóng tài nguyên hệ thống...")
     vit_worker.stop()
     mqtt_service.stop()
-    cap.release()
+    camera_manager.release_all()
     try:
         cv2.destroyAllWindows()
     except Exception:

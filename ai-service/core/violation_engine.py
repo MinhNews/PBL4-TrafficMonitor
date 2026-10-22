@@ -19,18 +19,48 @@ class ViolationEngine:
         self.violating_vehicles = {} # {tracker_id: {"timestamp": float, "box": list, "cls": str}}
         self.violating_helmets = set() # {tracker_id} - Chốt trạng thái vi phạm không đội mũ (Latch)
         self.passed_vehicles = set() # ID các xe đã đếm qua vạch
+        self._passed_ts = {} # {tracker_id: timestamp} - Mốc thời gian để dọn bộ nhớ (B1)
         self.reported_violations = {} # {entity_key: timestamp} - Cooldown chống báo lặp
         self.violation_count = 0 # A5: Bộ đếm vi phạm độc lập, chuẩn xác cho /status
         self.approach_direction = getattr(config, "APPROACH_DIRECTION", "up")
+
+    # B1: Thời gian sống tối đa của bộ nhớ vi phạm (giây).
+    # Xe đã khuất khỏi khung hình thì không cần giữ lại nữa.
+    VIOLATION_MEMORY_TTL = 10.0   # vi phạm đèn đỏ (được refresh mỗi frame khi xe còn xuất hiện)
+    PASSED_MEMORY_TTL = 120.0     # xe đã đếm lưu lượng
+    REPORTED_MEMORY_TTL = 600.0   # khóa cooldown 30s, giữ dư 10 phút cho chắc
 
     def reset(self):
         """Làm mới toàn bộ bộ nhớ vi phạm khi tua lại video loop hoặc đổi camera"""
         self.violating_vehicles.clear()
         self.violating_helmets.clear()
         self.passed_vehicles.clear()
+        self._passed_ts.clear()
         self.reported_violations.clear()
         self.violation_count = 0
         print("🔄 [VIOLATION ENGINE] Đã làm mới toàn bộ danh sách vi phạm & lưu lượng xe.")
+
+    def prune_stale(self):
+        """
+        B1: Dọn bộ nhớ định kỳ khi chạy camera liên tục nhiều giờ.
+        Trước đây các dict này chỉ được clear khi video tua lại, nên chạy camera thật
+        sẽ phình dần (rò rỉ bộ nhớ chậm). Hàm này an toàn: chỉ xóa mục đã quá TTL,
+        tức là xe đã biến mất khỏi khung hình từ lâu.
+        """
+        now = time.time()
+
+        for vid, data in list(self.violating_vehicles.items()):
+            if now - data.get("timestamp", 0) > self.VIOLATION_MEMORY_TTL:
+                self.violating_vehicles.pop(vid, None)
+
+        for vid, ts in list(self._passed_ts.items()):
+            if now - ts > self.PASSED_MEMORY_TTL:
+                self._passed_ts.pop(vid, None)
+                self.passed_vehicles.discard(vid)
+
+        for key, ts in list(self.reported_violations.items()):
+            if now - ts > self.REPORTED_MEMORY_TTL:
+                self.reported_violations.pop(key, None)
 
 
     @staticmethod
@@ -83,6 +113,7 @@ class ViolationEngine:
         )
         if crossed:
             self.passed_vehicles.add(entity.id)
+            self._passed_ts[entity.id] = time.time()  # B1: ghi mốc để dọn bộ nhớ sau này
             veh_type = "car" if entity.stable_class in ["car", "bus", "truck"] else "motorcycle"
             self.backend.send_traffic_flow(count=1, vehicle_type=veh_type)
             print(f"📊 [LƯU LƯỢNG XE] Xe #{entity.id} ({veh_type.upper()}) qua ngã tư. Tổng: {len(self.passed_vehicles)}")
@@ -153,11 +184,12 @@ class ViolationEngine:
 
         return False
 
-    def process_helmet_result(self, entity, is_no_helmet, conf, clean_frame):
+    def process_helmet_result(self, entity, is_no_helmet, conf, clean_frame, camera_id=None):
         """
         Cập nhật kết quả phân loại Mũ bảo hiểm từ ViT Worker.
         Chỉ phạt người điều khiển xe máy (role == 'rider'), gom biên bản theo mã xe máy (moto_id).
         Duy trì chốt vi phạm (Latch) để viền đỏ [KO MU] không bị tắt khi xe di chuyển.
+        C4: camera_id được chụp lúc submit (worker chạy async, có thể đã đổi camera).
         """
         # Nếu xe/người này đã từng bị chốt vi phạm không đội mũ: DUY TRÌ KHÓA VI PHẠM (Latch)
         if entity.id in self.violating_helmets or (entity.moto_id is not None and entity.moto_id in self.violating_helmets):
@@ -195,7 +227,7 @@ class ViolationEngine:
                 cv2.putText(evidence, f"KHONG DOI MU {int(conf * 100)}%", (bx1, max(20, by1 - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-                self.backend.send_violation(evidence, "NO_HELMET", "MOTORCYCLE", conf)
+                self.backend.send_violation(evidence, "NO_HELMET", "MOTORCYCLE", conf, camera_id=camera_id)
         else:
             entity.violation_no_helmet = False
             entity.helmet_conf = conf

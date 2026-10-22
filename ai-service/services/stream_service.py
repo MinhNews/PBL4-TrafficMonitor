@@ -3,6 +3,7 @@ import threading
 import logging
 import cv2
 from flask import Flask, Response, jsonify, request
+import runtime_config
 
 class LiveStreamServer:
     """
@@ -11,9 +12,10 @@ class LiveStreamServer:
     - Cung cấp trạng thái camera /status
     - Hỗ trợ đổi đèn thủ công qua API /light (có khóa an toàn khi có ESP32 thật)
     """
-    def __init__(self, mqtt_service, violation_engine, port=5000):
+    def __init__(self, mqtt_service, violation_engine, port=5000, camera_manager=None):
         self.mqtt_service = mqtt_service
         self.violation_engine = violation_engine
+        self.camera_manager = camera_manager
         self.port = port
         self.latest_jpeg = None
         self.frame_lock = threading.Lock()
@@ -29,6 +31,16 @@ class LiveStreamServer:
             res.headers['Access-Control-Allow-Headers'] = '*'
             res.headers['Access-Control-Allow-Methods'] = '*'
             return res
+
+        def _active_camera_payload():
+            """C4: camera đang giám sát + cờ đang chuyển (để Web hiện overlay)."""
+            if self.camera_manager is None:
+                return None
+            payload = self.camera_manager.describe()
+            pending = self.camera_manager.pending_id()
+            payload["switching"] = pending is not None
+            payload["pendingId"] = pending
+            return payload
 
         @self.app.route('/health')
         @self.app.route('/status')
@@ -46,8 +58,104 @@ class LiveStreamServer:
                 "width": self.metrics.get("width", 0),
                 "height": self.metrics.get("height", 0),
                 "orientation": "PORTRAIT" if self.metrics.get("height", 0) > self.metrics.get("width", 0) else "LANDSCAPE",
+                # C2: cấu hình đang chạy thật (để trang Settings hiển thị đồng bộ)
+                "stopLineRatio": runtime_config.stop_line_ratio(),
+                "approachDirection": runtime_config.approach_direction(),
+                # C4: bật/tắt vạch dừng + camera đang giám sát
+                "stopLineVisible": runtime_config.stop_line_visible(),
+                "activeCamera": _active_camera_payload(),
                 "timestamp": time.time()
             })
+
+        @self.app.route('/cameras')
+        def cameras():
+            """C4: danh sách camera cấu hình trong config.py + camera đang chạy."""
+            if self.camera_manager is None:
+                return jsonify({"cameras": [], "activeCamera": None})
+            return jsonify({
+                "cameras": self.camera_manager.list_cameras(),
+                "activeCamera": _active_camera_payload(),
+            })
+
+        @self.app.route('/camera/switch', methods=['POST'])
+        def camera_switch():
+            """
+            C4: yêu cầu đổi camera. AI áp dụng giữa hai frame (không restart),
+            giữ nguyên vị trí phát của camera cũ để quay lại thì phát tiếp.
+            """
+            if self.camera_manager is None:
+                return jsonify({"error": "CAMERA_MANAGER_UNAVAILABLE", "message": "AI chưa cấu hình camera"}), 503
+
+            data = request.get_json(silent=True) or {}
+            if "cameraId" not in data:
+                return jsonify({"error": "INVALID_CAMERA", "message": "Thiếu cameraId"}), 400
+
+            ok, message = self.camera_manager.request_switch(data.get("cameraId"))
+            if not ok:
+                return jsonify({"error": "INVALID_CAMERA", "message": message}), 404
+
+            return jsonify({
+                "status": "SWITCHING",
+                "message": message,
+                "activeCamera": _active_camera_payload(),
+            }), 202
+
+        @self.app.route('/config', methods=['GET', 'POST'])
+        def ai_config():
+            """
+            C2: Đọc / chỉnh cấu hình vạch dừng ngay khi AI đang chạy.
+            GET  -> trả cấu hình hiện tại + giá trị mặc định trong config.py
+            POST -> {"stopLineRatio": 0.65, "approachDirection": "up"}
+            """
+            if request.method == 'GET':
+                settings = runtime_config.get_settings()
+                defaults = runtime_config.get_defaults()
+                return jsonify({
+                    "stopLineRatio": settings["stopLineRatio"],
+                    "approachDirection": settings["approachDirection"],
+                    "stopLineVisible": settings["stopLineVisible"],
+                    "defaults": defaults,
+                    "isDefault": settings == defaults,
+                })
+
+            data = request.get_json(silent=True) or {}
+            before = runtime_config.get_settings()
+            ok, errors, settings = runtime_config.apply(data)
+            if not ok:
+                return jsonify({
+                    "error": "INVALID_CONFIG",
+                    "message": "; ".join(errors),
+                    "settings": settings,
+                }), 400
+
+            # Áp dụng tức thì cho engine đang chạy, không cần restart
+            self.violation_engine.approach_direction = settings["approachDirection"]
+            # Chỉ khi vạch/chiều xe đổi thật thì trạng thái "đã qua vạch" của phiên cũ mới sai.
+            # C4: bật/tắt hiển thị vạch KHÔNG được làm mất bộ đếm của phiên.
+            geometry_changed = (
+                settings["stopLineRatio"] != before["stopLineRatio"]
+                or settings["approachDirection"] != before["approachDirection"]
+            )
+            if geometry_changed:
+                self.violation_engine.reset()
+
+            return jsonify({
+                "status": "APPLIED",
+                "message": (
+                    "Đã áp dụng cấu hình cho AI đang chạy (bộ đếm phiên AI được làm mới)."
+                    if geometry_changed
+                    else "Đã áp dụng cấu hình cho AI đang chạy."
+                ),
+                "settings": settings,
+            })
+
+        @self.app.route('/config/reset', methods=['POST'])
+        def ai_config_reset():
+            """C2: Khôi phục mặc định lấy từ config.py."""
+            settings = runtime_config.reset()
+            self.violation_engine.approach_direction = settings["approachDirection"]
+            self.violation_engine.reset()
+            return jsonify({"status": "RESET", "settings": settings})
 
         @self.app.route('/light', methods=['POST'])
         def set_light():

@@ -1,7 +1,27 @@
 # ===== BACKEND =====
 BACKEND_URL = "http://localhost:8080"
 VIOLATION_ENDPOINT = f"{BACKEND_URL}/api/violations"
-CAMERA_ID = 1
+
+# ===== DANH SÁCH CAMERA (C4) =====
+# AI chỉ chạy MỘT camera tại một thời điểm; Web đổi camera không cần restart.
+# Thêm/bớt camera là việc triển khai (hiếm) -> sửa danh sách này rồi khởi động lại AI.
+#   - "source": đường dẫn file video (tương đối từ ai-service/), "0" = webcam, hoặc "rtsp://..."
+#   - Vạch dừng & chiều xe dùng CHUNG cho mọi camera, chỉnh live trên Web (runtime_config.json)
+CAMERAS = [
+    {
+        "id": 1,
+        "name": "Camera 01 - Hòa Khánh",
+        "source": "dataset/traffic2.mp4",
+    },
+    {
+        "id": 2,
+        "name": "Camera 02 - Hướng Đông",
+        "source": "dataset/videokodoimu.mp4",
+    },
+]
+
+DEFAULT_CAMERA_ID = 1          # Camera bật lên đầu tiên khi khởi động AI
+CAMERA_ID = DEFAULT_CAMERA_ID  # Giữ tên cũ để tương thích với BackendService
 
 # ===== MQTT (D2: Cần đồng bộ chính xác với firmware ESP32) =====
 MQTT_BROKER = "test.mosquitto.org"
@@ -11,6 +31,7 @@ MQTT_TOPIC_LIGHT = "pbl4/nhom3/traffic/light"
 # ===== CAMERA GEOMETRY (D1) =====
 APPROACH_DIRECTION = "up"  # "up" (xe đi lên, Y giảm dần) hoặc "down" (xe đi xuống, Y tăng dần)
 STOP_LINE_RATIO = 0.65     # Vị trí vạch dừng ngã tư tính theo tỷ lệ chiều cao khung hình (0.65 = 65%)
+STOP_LINE_VISIBLE = True   # Có vẽ vạch dừng lên video hay không (chỉ ảnh hưởng hiển thị, không ảnh hưởng logic)
 
 # ===== AI THRESHOLDS =====
 YOLO_CONFIDENCE_THRESHOLD = 0.25

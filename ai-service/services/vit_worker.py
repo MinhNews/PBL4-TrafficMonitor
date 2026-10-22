@@ -1,6 +1,8 @@
 import time
 import queue
 import threading
+import cv2
+import numpy as np
 
 class AsyncViTWorker:
     """
@@ -8,7 +10,12 @@ class AsyncViTWorker:
     - Hoạt động bất đồng bộ với hàng đợi (Queue), không làm nghẽn luồng xử lý video chính
     - Điều tiết tần suất phân tích (Throttling 0.12s) để bắt kịp xe di chuyển nhanh
     - Đánh giá chuyển đổi trạng thái [CO MU] và [KO MU] liên tục
+    - B2: Hàng đợi chỉ lưu ảnh nén JPEG thay vì cả khung hình BGR (tiết kiệm ~97% RAM)
     """
+    # B2: Chất lượng JPEG cho ảnh bằng chứng trong hàng đợi.
+    # 80 là đủ nét để khoanh khung vi phạm, dung lượng chỉ ~80-150KB/ảnh 720p.
+    EVIDENCE_JPEG_QUALITY = 80
+
     def __init__(self, helmet_clf, violation_engine):
         self.helmet_clf = helmet_clf
         self.violation_engine = violation_engine
@@ -20,8 +27,8 @@ class AsyncViTWorker:
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
-    def submit(self, entity, head_crop, clean_frame):
-        """Đẩy vùng cắt đầu vào hàng đợi xử lý ngầm"""
+    def submit(self, entity, head_crop, clean_frame, camera_id=None):
+        """Đẩy vùng cắt đầu vào hàng đợi xử lý ngầm (camera_id chụp tại thời điểm này)"""
         tr_id = entity.id
         now = time.time()
         # Đã chốt vi phạm không đội mũ thì không cần tốn CPU phân tích lại
@@ -32,9 +39,16 @@ class AsyncViTWorker:
             return
 
         if not self.queue.full():
+            # B2: Nén ngay khung hình thành JPEG (vài chục KB) rồi mới đưa vào queue.
+            # Trước đây queue giữ nguyên 25 khung BGR 720p ≈ 67MB RAM và ghim cả frame gốc.
+            ok, buf = cv2.imencode('.jpg', clean_frame,
+                                   [int(cv2.IMWRITE_JPEG_QUALITY), self.EVIDENCE_JPEG_QUALITY])
+            if not ok:
+                print("[ViT Worker] Bỏ qua khung hình: không nén được JPEG.")
+                return
             self.processing_tracks.add(tr_id)
             self.last_checked[tr_id] = now
-            self.queue.put_nowait((entity, head_crop.copy(), clean_frame))
+            self.queue.put_nowait((entity, head_crop.copy(), buf.tobytes(), camera_id))
 
 
     def get_status(self, tr_id):
@@ -77,7 +91,7 @@ class AsyncViTWorker:
     def _worker(self):
         while self.running:
             try:
-                entity, head_crop, clean_frame = self.queue.get(timeout=0.1)
+                entity, head_crop, jpeg_bytes, camera_id = self.queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
@@ -86,8 +100,14 @@ class AsyncViTWorker:
                 confirmed_no_helmet, h_conf = self.helmet_clf.update_and_check(entity.id, head_crop)
                 self.track_status[entity.id] = {"is_no_helmet": confirmed_no_helmet, "conf": h_conf}
 
+                # B2: Giải nén lại khung hình để vẽ bằng chứng (chỉ khi thực sự cần)
+                clean_frame = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if clean_frame is None:
+                    print(f"[ViT Worker] Không giải mã được ảnh cho track #{entity.id}, bỏ qua bằng chứng.")
+                    continue
+
                 # Gửi kết quả sang ViolationEngine để quyết định lập biên bản
-                self.violation_engine.process_helmet_result(entity, confirmed_no_helmet, h_conf, clean_frame)
+                self.violation_engine.process_helmet_result(entity, confirmed_no_helmet, h_conf, clean_frame, camera_id=camera_id)
             except Exception as e:
                 print(f"[ViT Worker Error] {e}")
             finally:
