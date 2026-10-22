@@ -5,9 +5,11 @@ import com.pbl4.trafficmonitor.entity.*;
 import com.pbl4.trafficmonitor.enums.*;
 import com.pbl4.trafficmonitor.repository.*;
 import com.pbl4.trafficmonitor.util.PenaltyRuleHelper;
+import jakarta.persistence.criteria.Predicate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.*;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +24,7 @@ public class ViolationService {
 
     private final ViolationRepository violationRepo;
     private final CameraRepository cameraRepo;
+    private final UserRepository userRepo;
     private final ImageStorageService imageStorageService; // Lưu local làm fallback dự phòng
     private final CloudinaryStorageService cloudinaryStorageService; // Upload ảnh Cloud
     private final SimpMessagingTemplate messagingTemplate; // Đẩy thời gian thực WebSocket
@@ -100,7 +103,24 @@ public class ViolationService {
 
     public Map<String, Object> getViolations(int page, int size, String type, String status) {
         Pageable pageable = PageRequest.of(page, size, Sort.by("detectedAt").descending());
-        Page<Violation> pageResult = violationRepo.findAll(pageable);
+
+        // Áp dụng bộ lọc thật sự (trước đây tham số type/status bị bỏ qua).
+        // Giá trị không hợp lệ sẽ bị bỏ qua để không làm hỏng truy vấn.
+        final ViolationType typeFilter = parseEnum(ViolationType.class, type);
+        final ViolationStatus statusFilter = parseEnum(ViolationStatus.class, status);
+
+        Specification<Violation> spec = (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+            if (typeFilter != null) {
+                predicates.add(cb.equal(root.get("violationType"), typeFilter));
+            }
+            if (statusFilter != null) {
+                predicates.add(cb.equal(root.get("status"), statusFilter));
+            }
+            return predicates.isEmpty() ? cb.conjunction() : cb.and(predicates.toArray(new Predicate[0]));
+        };
+
+        Page<Violation> pageResult = violationRepo.findAll(spec, pageable);
 
         List<ViolationResponseDTO> dtos = pageResult.getContent().stream()
                 .map(this::toResponseDTO).toList();
@@ -120,13 +140,29 @@ public class ViolationService {
     }
 
     @Transactional
-    public ViolationResponseDTO confirmViolation(Long id, String notes) {
+    public ViolationResponseDTO confirmViolation(Long id, String notes, String confirmedByUsername) {
         Violation v = violationRepo.findById(id)
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy vi phạm ID: " + id));
         v.setStatus(ViolationStatus.CONFIRMED);
         v.setNotes(notes);
         v.setConfirmedAt(java.time.LocalDateTime.now());
+        // Ghi nhận cán bộ đã duyệt hồ sơ (trước đây cột này luôn NULL)
+        if (confirmedByUsername != null && !confirmedByUsername.isBlank()) {
+            userRepo.findByUsername(confirmedByUsername).ifPresent(v::setConfirmedBy);
+        }
         return toResponseDTO(violationRepo.save(v));
+    }
+
+    /** Chuyển chuỗi sang enum, trả null nếu rỗng hoặc không hợp lệ. */
+    private static <E extends Enum<E>> E parseEnum(Class<E> type, String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Enum.valueOf(type, raw.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     @Transactional

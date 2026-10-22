@@ -3,16 +3,14 @@ package com.pbl4.trafficmonitor.repository;
 import com.pbl4.trafficmonitor.entity.Violation;
 import com.pbl4.trafficmonitor.enums.ViolationType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
 import java.time.LocalDate;
 import java.util.List;
 
 @Repository
-public interface ViolationRepository extends JpaRepository<Violation, Long> {
-    
-    // Lấy 10 vi phạm mới nhất để hiển thị real-time trên Web
-    List<Violation> findTop10ByOrderByDetectedAtDesc();
+public interface ViolationRepository extends JpaRepository<Violation, Long>, JpaSpecificationExecutor<Violation> {
 
     // Thẻ StatCard 1: Tổng số vi phạm trong ngày hôm nay
     @Query("SELECT COUNT(v) FROM Violation v WHERE DATE(v.detectedAt) = CURRENT_DATE")

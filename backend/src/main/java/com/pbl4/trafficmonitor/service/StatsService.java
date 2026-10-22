@@ -18,9 +18,11 @@ public class StatsService {
 
     public StatsDTO getTodayStats() {
         Long todayViolations = violationRepo.countTodayViolations();
+        // Lấy đúng số liệu thật từ bảng traffic_stats (AI đếm qua /api/stats/flow).
+        // Không sinh số ước lượng: nếu chưa có dữ liệu thì trả 0.
         Long vehiclesPassed = trafficStatRepo.sumTodayVehicles();
-        if (vehiclesPassed == null || vehiclesPassed == 0L) {
-            vehiclesPassed = todayViolations != null && todayViolations > 0 ? (todayViolations * 3 + 12) : 0L;
+        if (vehiclesPassed == null) {
+            vehiclesPassed = 0L;
         }
 
         return StatsDTO.builder()
@@ -68,20 +70,41 @@ public class StatsService {
     }
 
     public List<HourlyStatDTO> getHourlyStats(LocalDate date) {
+        // 1. Số vi phạm theo giờ (bảng violations)
         List<Object[]> raw = violationRepo.countByHourOnDate(date);
         Map<Integer, Long> hourMap = new HashMap<>();
         for (Object[] row : raw) {
             hourMap.put(((Number) row[0]).intValue(), ((Number) row[1]).longValue());
         }
 
+        // 2. C1: Lưu lượng xe theo giờ (bảng traffic_stats đã có sẵn dữ liệu)
+        Map<Integer, long[]> flowMap = new HashMap<>();
+        for (Object[] row : trafficStatRepo.sumVehicleStatsByHourOnDate(date)) {
+            int h = ((Number) row[0]).intValue();
+            flowMap.put(h, new long[]{
+                    toLong(row[1]),  // vehicleCount
+                    toLong(row[2]),  // motorcycleCount
+                    toLong(row[3])   // carCount
+            });
+        }
+
         List<HourlyStatDTO> result = new ArrayList<>();
         for (int h = 0; h < 24; h++) {
+            long[] flow = flowMap.getOrDefault(h, new long[]{0L, 0L, 0L});
             result.add(HourlyStatDTO.builder()
                 .hour(h)
                 .count(hourMap.getOrDefault(h, 0L))
                 .label(String.format("%02d:00", h))
+                .vehicleCount(flow[0])
+                .motorcycleCount(flow[1])
+                .carCount(flow[2])
                 .build());
         }
         return result;
+    }
+
+    /** C1: SUM() có thể trả null (cột chưa có dữ liệu) hoặc BigDecimal -> ép an toàn về long. */
+    private static long toLong(Object value) {
+        return value == null ? 0L : ((Number) value).longValue();
     }
 }

@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS system_config (
 -- ==========================================
 INSERT INTO regions (name, city, district) VALUES ('Ngã tư Hòa Khánh', 'Đà Nẵng', 'Liên Chiểu');
 INSERT INTO cameras (region_id, name, location_description, stream_url) VALUES (1, 'Camera 01 - Hòa Khánh', 'Góc Tây Bắc ngã tư', 'http://localhost:5000/video_feed');
+-- C4: camera thứ 2 (cùng một luồng MJPEG vì AI chỉ chạy 1 camera tại một thời điểm)
+INSERT INTO cameras (id, region_id, name, location_description, stream_url) VALUES (2, 1, 'Camera 02 - Hướng Đông', 'Góc Đông Nam ngã tư', 'http://localhost:5000/video_feed');
 INSERT INTO vehicles (type, name_vi) VALUES ('MOTORCYCLE', 'Xe máy'), ('CAR', 'Ô tô'), ('TRUCK', 'Xe tải'), ('BUS', 'Xe buýt');
 INSERT INTO users (username, password, full_name, role) VALUES ('admin', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lh8i', 'Admin Nhóm 3', 'ADMIN');
 INSERT INTO system_config (config_key, config_value, description) VALUES

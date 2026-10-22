@@ -19,4 +19,13 @@ public interface TrafficStatRepository extends JpaRepository<TrafficStat, Long> 
     // Thẻ StatCard 4: Tổng số lượt xe đã lưu thông qua ngã tư hôm nay
     @Query("SELECT COALESCE(SUM(t.vehicleCount), 0) FROM TrafficStat t WHERE t.statDate = CURRENT_DATE")
     Long sumTodayVehicles();
+
+    /**
+     * C1: Lưu lượng xe theo từng khung giờ trong ngày (gộp tất cả camera).
+     * Dữ liệu đã có sẵn trong bảng traffic_stats do StatsService.recordVehicleCount ghi,
+     * trước đây chưa có endpoint nào đọc ra nên biểu đồ chỉ vẽ được số vi phạm.
+     */
+    @Query("SELECT t.statHour, SUM(t.vehicleCount), SUM(t.motorcycleCount), SUM(t.carCount) " +
+           "FROM TrafficStat t WHERE t.statDate = :date GROUP BY t.statHour")
+    List<Object[]> sumVehicleStatsByHourOnDate(LocalDate date);
 }

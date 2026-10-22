@@ -38,15 +38,17 @@ public class AuthService {
         var existing = userRepository.findByUsername(username);
         if (existing.isPresent()) {
             User u = existing.get();
-            // Kiểm tra xem mật khẩu hiện tại có khớp với rawPassword không, nếu không thì cập nhật lại bằng BCrypt
-            if (u.getPassword() == null || !passwordEncoder.matches(rawPassword, u.getPassword())) {
+            // Chỉ nâng cấp khi mật khẩu còn lưu dạng plaintext (dữ liệu cũ).
+            // KHÔNG ghi đè mật khẩu người dùng đã đổi mỗi lần khởi động.
+            boolean legacyPlaintext = u.getPassword() == null || !u.getPassword().startsWith("$2");
+            if (legacyPlaintext) {
                 u.setPassword(passwordEncoder.encode(rawPassword));
                 u.setFullName(fullName);
                 u.setRole(role);
                 u.setEmail(badgeId + "@csgt.vn");
                 u.setIsActive(true);
                 userRepository.save(u);
-                log.info("🔄 [AUTH] Đã cập nhật mật khẩu BCrypt cho tài khoản: {} ({})", username, role);
+                log.info("🔄 [AUTH] Đã nâng cấp mật khẩu plaintext sang BCrypt cho tài khoản: {} ({})", username, role);
             }
             return;
         }
