@@ -2,6 +2,7 @@ ai-service/models/
 ai-service/dataset/
 ai-service/uploads/
 ai-service/pbl4_env/
+ai-service/runtime_config.json
 **/__pycache__/
 *.py[cod]
 *$py.class
