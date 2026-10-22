@@ -1,70 +1,109 @@
 import React, { useState, useEffect } from 'react';
 import { cameraAPI } from '../services/api';
 
+const AI_BASE = 'http://localhost:5000';
+const STATUS_URL = `${AI_BASE}/status`;
+const SWITCH_URL = `${AI_BASE}/camera/switch`;
+
 const DEFAULT_CAMERA = {
   id: 1,
-  code: 'CAM-HK-01',
+  code: 'CAM-01',
   name: 'Camera 01: Ngã Tư Hòa Khánh',
   regionName: 'Ngã tư Hòa Khánh',
   locationDescription: 'Góc Tây Bắc nút giao — Quận Liên Chiểu, TP. Đà Nẵng',
-  streamUrl: 'http://localhost:5000/video_feed',
-  aiModel: 'YOLO11n + ByteTrack',
-  resolution: 'Vertical HD (405×720 Stream)',
+  streamUrl: `${AI_BASE}/video_feed`,
+  aiModel: 'YOLO11s + ViT + ByteTrack',
   status: 'ONLINE',
 };
 
+async function fetchAiStatus() {
+  const res = await fetch(STATUS_URL, { signal: AbortSignal.timeout(2000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export default function CamerasMap() {
   const [cameras, setCameras] = useState([DEFAULT_CAMERA]);
-  const [loading, setLoading] = useState(false);
   const [selectedCamera, setSelectedCamera] = useState(null);
-  const [liveMetrics, setLiveMetrics] = useState({ fps: 30, light: 'GREEN', vehiclesPassed: 0, violations: 0 });
+  const [liveMetrics, setLiveMetrics] = useState({ fps: 0, light: 'GREEN', vehiclesPassed: 0, violations: 0, activeCamera: null });
+  const [aiOnline, setAiOnline] = useState(false);
+  const [switchingId, setSwitchingId] = useState(null);
 
   // 1. Fetch active cameras from Backend API
   useEffect(() => {
     async function loadCameras() {
       try {
-        setLoading(true);
         const res = await cameraAPI.getAll();
         if (res.data && res.data.length > 0) {
           const mapped = res.data.map(c => ({
             id: c.id,
-            code: `CAM-HK-0${c.id}`,
+            code: `CAM-${String(c.id).padStart(2, '0')}`,
             name: c.name || `Camera ${c.id}`,
             regionName: c.regionName || 'Ngã tư Hòa Khánh',
             locationDescription: c.locationDescription || 'Nút giao giám sát',
-            streamUrl: c.streamUrl || 'http://localhost:5000/video_feed',
-            aiModel: 'YOLO11n + ByteTrack',
-            resolution: 'Vertical HD (405×720 Stream)',
+            streamUrl: c.streamUrl || `${AI_BASE}/video_feed`,
+            aiModel: 'YOLO11s + ViT + ByteTrack',
             status: c.isActive ? 'ONLINE' : 'OFFLINE',
           }));
           setCameras(mapped);
         }
       } catch (err) {
         console.warn('Không tải được danh sách camera từ backend, sử dụng camera mặc định', err);
-      } finally {
-        setLoading(false);
       }
     }
     loadCameras();
   }, []);
 
-  // 2. Poll live metrics from AI service
+  // 2. Poll live metrics + camera đang giám sát từ AI service
   useEffect(() => {
-    async function checkStatus() {
+    let alive = true;
+    async function poll() {
       try {
-        const res = await fetch('http://localhost:5000/status', { signal: AbortSignal.timeout(1500) });
-        if (res.ok) {
-          const data = await res.json();
-          setLiveMetrics(data);
-        }
+        const data = await fetchAiStatus();
+        if (!alive) return;
+        setLiveMetrics(data);
+        setAiOnline(true);
       } catch {
-        // AI service offline or busy
+        if (alive) setAiOnline(false);
       }
     }
-    checkStatus();
-    const interval = setInterval(checkStatus, 2500);
-    return () => clearInterval(interval);
+    poll();
+    const interval = setInterval(poll, 2500);
+    return () => { alive = false; clearInterval(interval); };
   }, []);
+
+  // 3. C4: chuyển camera AI đang giám sát (chỉ 1 luồng suy luận tại một thời điểm)
+  async function switchTo(cameraId) {
+    if (!cameraId || switchingId) return;
+    setSwitchingId(cameraId);
+    try {
+      const res = await fetch(SWITCH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cameraId }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      for (let i = 0; i < 8; i += 1) {
+        await new Promise(r => setTimeout(r, 500));
+        const data = await fetchAiStatus();
+        setLiveMetrics(data);
+        setAiOnline(true);
+        if (data?.activeCamera?.id === cameraId && !data?.activeCamera?.switching) break;
+      }
+    } catch (err) {
+      console.warn('Không chuyển được camera:', err);
+    } finally {
+      setSwitchingId(null);
+    }
+  }
+
+  const activeId = liveMetrics?.activeCamera?.id ?? null;
+  const activeName = liveMetrics?.activeCamera?.name;
+  const activeResolution = liveMetrics?.width && liveMetrics?.height
+    ? `${liveMetrics.width}×${liveMetrics.height}`
+    : null;
+  const selectedIsActive = Boolean(selectedCamera) && aiOnline && activeId === selectedCamera.id;
 
   return (
     <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -76,7 +115,7 @@ export default function CamerasMap() {
             Hạ Tầng Camera Giám Sát Nút Giao
           </h1>
           <div style={{ fontSize: '12px', color: 'var(--t-muted)', marginTop: '3px' }}>
-            Quản trị luồng camera trực tiếp từ trạm thị giác máy tính và trạng thái nhận diện giao thông
+            AI chỉ suy luận một camera tại một thời điểm — chọn camera để chuyển luồng phân tích, không cần restart
           </div>
         </div>
 
@@ -86,14 +125,17 @@ export default function CamerasMap() {
             fontWeight: 600,
             padding: '4px 10px',
             borderRadius: '4px',
-            backgroundColor: '#dcfce7',
-            color: '#15803d',
+            backgroundColor: aiOnline ? '#dcfce7' : '#f1f5f9',
+            color: aiOnline ? '#15803d' : '#64748b',
+            border: aiOnline ? '1px solid #bbf7d0' : '1px solid #cbd5e1',
             display: 'flex',
             alignItems: 'center',
             gap: '6px'
           }}>
-            <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#22c55e' }} />
-            {cameras.length} Trạm Đang Hoạt Động
+            <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: aiOnline ? '#22c55e' : '#94a3b8' }} />
+            {aiOnline
+              ? `${cameras.length} camera đã cấu hình · đang giám sát: ${activeName || 'chưa chọn'}`
+              : 'AI Engine ngoại tuyến — chưa giám sát camera nào'}
           </span>
         </div>
       </div>
@@ -105,9 +147,10 @@ export default function CamerasMap() {
         gap: '20px'
       }}>
         {cameras.map((cam) => {
-          const isOnline = cam.status === 'ONLINE';
-          const vehicles = liveMetrics.vehiclesPassed || 0;
-          const violations = liveMetrics.violations || 0;
+          const isActive = aiOnline && activeId === cam.id;
+          const isSwitching = switchingId === cam.id;
+          const vehicles = isActive ? (liveMetrics.vehiclesPassed || 0) : null;
+          const violations = isActive ? (liveMetrics.violations || 0) : null;
 
           return (
             <div
@@ -132,7 +175,7 @@ export default function CamerasMap() {
                 alignItems: 'center',
                 justifyContent: 'center'
               }}>
-                {isOnline ? (
+                {isActive ? (
                   <img
                     src={cam.streamUrl}
                     alt={cam.name}
@@ -146,18 +189,29 @@ export default function CamerasMap() {
                     onError={(e) => { e.target.style.display = 'none'; }}
                   />
                 ) : (
-                  <div style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: '8px',
-                    color: '#64748b'
-                  }}>
+                  <div
+                    title={aiOnline ? 'Camera đang chờ — AI chỉ giám sát một camera tại một thời điểm' : 'AI Engine chưa chạy'}
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                      color: '#64748b',
+                      padding: '20px',
+                      textAlign: 'center',
+                    }}
+                  >
                     <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                       <path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
                     </svg>
-                    <span style={{ fontSize: '12px', fontWeight: 600 }}>
-                      MẤT TÍN HIỆU CAMERA
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: '#e2e8f0' }}>
+                      {aiOnline ? 'CAMERA CHƯA ĐƯỢC GIÁM SÁT' : 'AI ENGINE CHƯA CHẠY'}
+                    </span>
+                    <span style={{ fontSize: '11px', color: '#94a3b8', maxWidth: '290px', lineHeight: 1.5 }}>
+                      {aiOnline
+                        ? 'AI chỉ suy luận một camera tại một thời điểm (giới hạn CPU). Bấm nút bên dưới để chuyển luồng phân tích sang camera này.'
+                        : 'Bật ai-service (port 5000) để xem luồng và chuyển camera.'}
                     </span>
                   </div>
                 )}
@@ -182,7 +236,7 @@ export default function CamerasMap() {
                   }}>
                     {cam.code}
                   </span>
-                  {isOnline && (
+                  {isActive && (
                     <span style={{
                       backgroundColor: '#dc2626',
                       color: '#ffffff',
@@ -204,14 +258,14 @@ export default function CamerasMap() {
                   position: 'absolute',
                   top: '10px',
                   right: '10px',
-                  backgroundColor: isOnline ? '#16a34a' : '#64748b',
+                  backgroundColor: isActive ? '#16a34a' : '#475569',
                   color: '#ffffff',
                   fontSize: '10.5px',
                   fontWeight: 700,
                   padding: '3px 8px',
                   borderRadius: '4px',
                 }}>
-                  {isOnline ? 'KẾT NỐI TỐT' : 'NGOẠI TUYẾN'}
+                  {isActive ? 'ĐANG GIÁM SÁT' : (aiOnline ? 'CHỜ CHUYỂN' : 'AI NGOẠI TUYẾN')}
                 </div>
               </div>
 
@@ -242,34 +296,61 @@ export default function CamerasMap() {
                     <strong style={{ color: '#1d4ed8' }}>{cam.aiModel}</strong>
                   </div>
                   <div>
-                    <span style={{ color: 'var(--t-muted)', display: 'block', fontSize: '10.5px' }}>ĐỘ PHÂN GIẢI:</span>
-                    <strong style={{ color: 'var(--t-secondary)' }}>{cam.resolution}</strong>
+                    <span style={{ color: 'var(--t-muted)', display: 'block', fontSize: '10.5px' }}>ĐỘ PHÂN GIẢI ĐANG XỬ LÝ:</span>
+                    <strong style={{ color: 'var(--t-secondary)' }}>
+                      {isActive && activeResolution ? activeResolution : '—'}
+                    </strong>
                   </div>
                   <div>
-                    <span style={{ color: 'var(--t-muted)', display: 'block', fontSize: '10.5px' }}>LƯU LƯỢNG XE QUA:</span>
-                    <strong style={{ color: '#16a34a' }}>{vehicles} lượt xe</strong>
+                    <span style={{ color: 'var(--t-muted)', display: 'block', fontSize: '10.5px' }}>LƯU LƯỢNG PHIÊN NÀY:</span>
+                    <strong style={{ color: '#16a34a' }}>{vehicles == null ? '—' : `${vehicles} lượt xe`}</strong>
                   </div>
                   <div>
-                    <span style={{ color: 'var(--t-muted)', display: 'block', fontSize: '10.5px' }}>SỐ CA VI PHẠM:</span>
-                    <strong style={{ color: violations > 0 ? '#dc2626' : 'var(--t-secondary)' }}>{violations} ca</strong>
+                    <span style={{ color: 'var(--t-muted)', display: 'block', fontSize: '10.5px' }}>SỐ CA VI PHẠM PHIÊN NÀY:</span>
+                    <strong style={{ color: violations > 0 ? '#dc2626' : 'var(--t-secondary)' }}>
+                      {violations == null ? '—' : `${violations} ca`}
+                    </strong>
                   </div>
+                </div>
+
+                <div style={{ fontSize: '10.5px', color: 'var(--t-muted)', marginTop: '-4px' }}>
+                  Số liệu là của phiên AI đang chạy và chỉ áp dụng cho camera đang được giám sát.
                 </div>
 
                 {/* Action button */}
                 <div style={{ marginTop: 'auto', paddingTop: '4px' }}>
-                  <button
-                    onClick={() => setSelectedCamera(cam)}
-                    className="btn btn-primary"
-                    style={{
-                      width: '100%',
-                      justifyContent: 'center',
-                      padding: '8px 14px',
-                      fontSize: '12.5px',
-                      fontWeight: 600
-                    }}
-                  >
-                    Xem Toàn Màn Hình HD ➔
-                  </button>
+                  {isActive ? (
+                    <button
+                      onClick={() => setSelectedCamera(cam)}
+                      className="btn btn-primary"
+                      style={{
+                        width: '100%',
+                        justifyContent: 'center',
+                        padding: '8px 14px',
+                        fontSize: '12.5px',
+                        fontWeight: 600
+                      }}
+                    >
+                      Xem Toàn Màn Hình HD ➔
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => switchTo(cam.id)}
+                      disabled={!aiOnline || Boolean(switchingId)}
+                      className="btn btn-primary"
+                      style={{
+                        width: '100%',
+                        justifyContent: 'center',
+                        padding: '8px 14px',
+                        fontSize: '12.5px',
+                        fontWeight: 600,
+                        opacity: (!aiOnline || (switchingId && !isSwitching)) ? 0.55 : 1,
+                        cursor: (!aiOnline || switchingId) ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {isSwitching ? 'Đang chuyển camera...' : 'Chuyển AI Sang Camera Này ➔'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -353,11 +434,36 @@ export default function CamerasMap() {
                 overflow: 'hidden',
                 borderRight: '1px solid var(--c-border)'
               }}>
-                <img
-                  src={selectedCamera.streamUrl}
-                  alt="Live Video"
-                  style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-                />
+                {selectedIsActive ? (
+                  <img
+                    src={selectedCamera.streamUrl}
+                    alt="Live Video"
+                    style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                  />
+                ) : (
+                  <div style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    gap: '10px', color: '#94a3b8', padding: '24px', textAlign: 'center',
+                  }}>
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                    </svg>
+                    <div style={{ fontSize: '13px', fontWeight: 700, color: '#e2e8f0' }}>
+                      {aiOnline ? 'Camera này chưa được AI giám sát' : 'AI Engine chưa chạy'}
+                    </div>
+                    <div style={{ fontSize: '11.5px', maxWidth: '320px', lineHeight: 1.5 }}>
+                      AI chỉ chạy một camera tại một thời điểm. Chuyển sang camera này để xem luồng có phân tích.
+                    </div>
+                    <button
+                      onClick={() => switchTo(selectedCamera.id)}
+                      disabled={!aiOnline || Boolean(switchingId)}
+                      className="btn btn-primary"
+                      style={{ padding: '7px 14px', fontSize: '12px' }}
+                    >
+                      {switchingId === selectedCamera.id ? 'Đang chuyển camera...' : `Chuyển sang ${selectedCamera.code}`}
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Sidebar Info */}
@@ -377,11 +483,17 @@ export default function CamerasMap() {
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <span style={{ color: '#64748b' }}>Độ Phân Giải:</span>
-                      <strong style={{ color: '#0f172a' }}>{selectedCamera.resolution}</strong>
+                      <strong style={{ color: '#0f172a' }}>{selectedIsActive && activeResolution ? activeResolution : '—'}</strong>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <span style={{ color: '#64748b' }}>Tốc Độ Khung Hình:</span>
-                      <strong style={{ color: '#16a34a' }}>{liveMetrics.fps || 30} FPS</strong>
+                      <strong style={{ color: '#16a34a' }}>{selectedIsActive ? `${liveMetrics.fps || 0} FPS` : '—'}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: '#64748b' }}>Trạng Thái:</span>
+                      <strong style={{ color: selectedIsActive ? '#16a34a' : '#64748b' }}>
+                        {selectedIsActive ? 'ĐANG GIÁM SÁT' : 'CHỜ CHUYỂN'}
+                      </strong>
                     </div>
                   </div>
                 </div>
@@ -396,7 +508,8 @@ export default function CamerasMap() {
                     TRẠNG THÁI TRUYỀN PHÁT
                   </div>
                   <div style={{ fontSize: '12px', color: '#64748b', lineHeight: 1.5 }}>
-                    Luồng RTSP/MJPEG được giải mã và phát hiện đối tượng thời gian thực bằng YOLO11n + ByteTrack trước khi chuyển dữ liệu vi phạm về Spring Boot Backend.
+                    Luồng MJPEG được AI giải mã và phát hiện đối tượng bằng YOLO11s + ViT + ByteTrack trước khi gửi dữ liệu vi phạm về Spring Boot Backend.
+                    {!selectedIsActive && ' Camera này hiện không nằm trong luồng suy luận — bấm nút chuyển camera để giám sát.'}
                   </div>
                 </div>
 

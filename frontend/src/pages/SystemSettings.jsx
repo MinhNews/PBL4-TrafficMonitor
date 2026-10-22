@@ -1,59 +1,97 @@
 import React, { useState, useEffect } from 'react';
-import { configAPI } from '../services/api';
+import { configAPI, aiAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 export default function SystemSettings() {
     const { isAdmin } = useAuth();
-    const [stopLineY, setStopLineY] = useState(468);
-    const [confThreshold, setConfThreshold] = useState(0.22);
-    const [yoloModel, setYoloModel] = useState('yolo11n.pt');
-    const [cameraLocation, setCameraLocation] = useState('Ngã Tư Hòa Khánh, Q. Liên Chiểu, TP. Đà Nẵng');
-    const [saving, setSaving] = useState(false);
-    const [saveResult, setSaveResult] = useState(null); // 'ok' | 'error'
-    const [loading, setLoading] = useState(true);
 
+    // --- C2: cấu hình vạch dừng của AI (chỉnh trực tiếp trên AI đang chạy) ---
+    const [stopLineRatio, setStopLineRatio] = useState(0.65);
+    const [approachDirection, setApproachDirection] = useState('up');
+    const [stopLineVisible, setStopLineVisible] = useState(true);
+    const [aiDefaults, setAiDefaults] = useState({ stopLineRatio: 0.65, approachDirection: 'up', stopLineVisible: true });
+    const [aiOnline, setAiOnline] = useState(null); // null = đang kiểm tra
+    const [aiFrameHeight, setAiFrameHeight] = useState(720);
+    const [aiSaving, setAiSaving] = useState(false);
+    const [aiMessage, setAiMessage] = useState(null); // { type, text }
+
+    // C2: đọc cấu hình thật từ AI Engine (nguồn chân lý) + kích thước khung hình
     useEffect(() => {
-        // Load from DB
-        configAPI.getConfig()
-            .then(res => {
-                if (res.data) {
-                    if (res.data.STOP_LINE_Y !== undefined) setStopLineY(Number(res.data.STOP_LINE_Y));
-                    if (res.data.YOLO_CONF !== undefined) setConfThreshold(Number(res.data.YOLO_CONF));
-                    if (res.data.YOLO_MODEL) setYoloModel(res.data.YOLO_MODEL);
-                    if (res.data.CAMERA_LOCATION) setCameraLocation(res.data.CAMERA_LOCATION);
+        let alive = true;
+        Promise.allSettled([aiAPI.getConfig(), aiAPI.getStatus()])
+            .then(([cfgRes, statusRes]) => {
+                if (!alive) return;
+                if (cfgRes.status === 'fulfilled') {
+                    const cfg = cfgRes.value.data || {};
+                    if (cfg.stopLineRatio != null) setStopLineRatio(Number(cfg.stopLineRatio));
+                    if (cfg.approachDirection) setApproachDirection(String(cfg.approachDirection).toLowerCase());
+                    if (typeof cfg.stopLineVisible === 'boolean') setStopLineVisible(cfg.stopLineVisible);
+                    if (cfg.defaults) setAiDefaults({
+                        stopLineRatio: Number(cfg.defaults.stopLineRatio),
+                        approachDirection: String(cfg.defaults.approachDirection).toLowerCase(),
+                        stopLineVisible: cfg.defaults.stopLineVisible !== false,
+                    });
                 }
-            })
-            .catch(() => {
-                // Fallback to localStorage cache
-                const cached = localStorage.getItem('PBL4_CONFIG');
-                if (cached) try {
-                    const p = JSON.parse(cached);
-                    if (p.stopLineY) setStopLineY(Number(p.stopLineY));
-                    if (p.confThreshold) setConfThreshold(Number(p.confThreshold));
-                } catch {}
-            })
-            .finally(() => setLoading(false));
+                if (statusRes.status === 'fulfilled') {
+                    setAiOnline(true);
+                    const h = Number(statusRes.value.data?.height);
+                    if (h > 0) setAiFrameHeight(h);
+                } else {
+                    setAiOnline(false);
+                }
+            });
+        return () => { alive = false; };
     }, []);
 
-    async function handleSave(e) {
-        e.preventDefault();
-        setSaving(true);
-        setSaveResult(null);
+    async function handleApplyAiConfig() {
+        setAiSaving(true);
+        setAiMessage(null);
         try {
-            await configAPI.saveConfig({
-                STOP_LINE_Y: stopLineY,
-                YOLO_CONF: confThreshold,
-                YOLO_MODEL: yoloModel,
-                CAMERA_LOCATION: cameraLocation,
+            const res = await aiAPI.setConfig({ stopLineRatio, approachDirection, stopLineVisible });
+            const applied = res.data?.settings || {};
+            if (applied.stopLineRatio != null) setStopLineRatio(Number(applied.stopLineRatio));
+            if (applied.approachDirection) setApproachDirection(String(applied.approachDirection).toLowerCase());
+            if (typeof applied.stopLineVisible === 'boolean') setStopLineVisible(applied.stopLineVisible);
+            setAiOnline(true);
+            setAiMessage({
+                type: 'ok',
+                text: 'Đã áp dụng cho AI đang chạy. Vạch dừng mới có hiệu lực ngay, không cần restart.',
             });
-            // Also cache locally
-            localStorage.setItem('PBL4_CONFIG', JSON.stringify({ stopLineY, confThreshold }));
-            setSaveResult('ok');
-        } catch {
-            setSaveResult('error');
+            // Lưu bản sao vào MySQL chỉ để tra cứu (AI đọc cấu hình từ runtime_config.json)
+            configAPI.saveConfig({
+                STOP_LINE_RATIO: applied.stopLineRatio ?? stopLineRatio,
+                APPROACH_DIRECTION: applied.approachDirection ?? approachDirection,
+            }).catch(() => {});
+        } catch (err) {
+            setAiOnline(false);
+            setAiMessage({
+                type: 'error',
+                text: err.response?.data?.message
+                    || 'Không kết nối được AI Engine (localhost:5000). Hãy bật ai-service trước khi áp dụng.',
+            });
         } finally {
-            setSaving(false);
-            setTimeout(() => setSaveResult(null), 4000);
+            setAiSaving(false);
+            setTimeout(() => setAiMessage(null), 7000);
+        }
+    }
+
+    async function handleResetAiConfig() {
+        setAiSaving(true);
+        setAiMessage(null);
+        try {
+            const res = await aiAPI.resetConfig();
+            const applied = res.data?.settings || aiDefaults;
+            setStopLineRatio(Number(applied.stopLineRatio));
+            setApproachDirection(String(applied.approachDirection).toLowerCase());
+            if (typeof applied.stopLineVisible === 'boolean') setStopLineVisible(applied.stopLineVisible);
+            setAiOnline(true);
+            setAiMessage({ type: 'ok', text: 'Đã khôi phục vạch dừng mặc định trong config.py.' });
+        } catch {
+            setAiOnline(false);
+            setAiMessage({ type: 'error', text: 'Không kết nối được AI Engine (localhost:5000).' });
+        } finally {
+            setAiSaving(false);
+            setTimeout(() => setAiMessage(null), 7000);
         }
     }
 
@@ -66,7 +104,9 @@ export default function SystemSettings() {
                     Cấu Hình Tham Số Hệ Thống
                 </h1>
                 <div style={{ fontSize: '12.5px', color: 'var(--t-muted)', marginTop: '4px' }}>
-                    Các tham số vận hành được đồng bộ vào cơ sở dữ liệu MySQL (bảng <code style={{ fontFamily: 'var(--mono)', fontSize: '11px', background: 'rgba(255,255,255,0.07)', padding: '1px 5px', borderRadius: '4px' }}>system_config</code>)
+                    Vạch dừng được áp dụng trực tiếp vào AI Engine (lưu tại{' '}
+                    <code style={{ fontFamily: 'var(--mono)', fontSize: '11px', background: 'rgba(255,255,255,0.07)', padding: '1px 5px', borderRadius: '4px' }}>ai-service/runtime_config.json</code>).
+                    Bảng <code style={{ fontFamily: 'var(--mono)', fontSize: '11px', background: 'rgba(255,255,255,0.07)', padding: '1px 5px', borderRadius: '4px' }}>system_config</code> chỉ giữ bản sao để tra cứu.
                 </div>
             </div>
 
@@ -87,101 +127,142 @@ export default function SystemSettings() {
                 </div>
             )}
 
-            <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
 
-                {/* AI parameters section */}
-                <Section title="Tham Số Mô Hình AI" icon={
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+                {/* C2: Cấu hình vạch dừng áp dụng ngay cho AI đang chạy */}
+                <Section title="Vạch Dừng AI (Áp Dụng Ngay)" icon={
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <line x1="3" y1="12" x2="21" y2="12"/><line x1="6" y1="7" x2="6" y2="17"/><line x1="12" y1="7" x2="12" y2="17"/><line x1="18" y1="7" x2="18" y2="17"/>
+                    </svg>
                 }>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                        <FormField
-                            label="Tọa Độ Vạch Dừng Ảo (Stop Line Y)"
-                            description="Vị trí đường kẻ ngang vạch dừng trên khung hình video (pixel)"
-                            hint="Mặc định: 468px — Camera ngã tư Hòa Khánh"
-                        >
-                            <input
-                                className="input-field"
-                                type="number"
-                                value={stopLineY}
-                                onChange={e => setStopLineY(Number(e.target.value))}
-                                disabled={!isAdmin}
-                                min={100} max={900}
-                                style={{ fontFamily: 'var(--mono)', opacity: isAdmin ? 1 : 0.5 }}
-                            />
-                        </FormField>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11.5px' }}>
+                            <span style={{
+                                width: '8px', height: '8px', borderRadius: '50%',
+                                backgroundColor: aiOnline === null ? '#94a3b8' : aiOnline ? '#22c55e' : '#ef4444',
+                                boxShadow: aiOnline === null ? 'none' : `0 0 6px ${aiOnline ? '#22c55e' : '#ef4444'}`,
+                            }} />
+                            <span style={{ color: 'var(--t-muted)' }}>
+                                {aiOnline === null ? 'Đang kiểm tra AI Engine...'
+                                    : aiOnline ? `AI Engine trực tuyến · khung ${aiFrameHeight}px`
+                                    : 'AI Engine chưa chạy (port 5000) — bật ai-service để chỉnh trực tiếp'}
+                            </span>
+                        </div>
 
-                        <FormField
-                            label="Ngưỡng Tin Cậy Tối Thiểu (Confidence)"
-                            description="Ngưỡng lọc nhiễu phát hiện phương tiện của mô hình YOLO11"
-                            hint="0.22 = bắt dính xe máy ở xa, 0.45+ = ít false-positive"
-                        >
-                            <input
-                                className="input-field"
-                                type="number"
-                                step="0.01" min="0.1" max="0.9"
-                                value={confThreshold}
-                                onChange={e => setConfThreshold(Number(e.target.value))}
-                                disabled={!isAdmin}
-                                style={{ fontFamily: 'var(--mono)', opacity: isAdmin ? 1 : 0.5 }}
-                            />
-                        </FormField>
-
-                        <FormField
-                            label="Phiên Bản Mô Hình YOLO"
-                            description="Tệp trọng số YOLO11 được nạp vào AI Engine"
-                            hint="yolo11n.pt (Nano 30FPS) · yolo11s.pt · yolo11m.pt"
-                        >
-                            <select
-                                className="input-field"
-                                value={yoloModel}
-                                onChange={e => setYoloModel(e.target.value)}
-                                disabled={!isAdmin}
-                                style={{ fontFamily: 'var(--mono)', opacity: isAdmin ? 1 : 0.5, cursor: isAdmin ? 'pointer' : 'not-allowed' }}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: '18px' }}>
+                            <FormField
+                                label={`Tỉ Lệ Vạch Dừng — ${stopLineRatio.toFixed(2)}`}
+                                description="Vị trí vạch dừng tính theo chiều cao khung hình (0.05 – 0.95)"
+                                hint={`Y ≈ ${Math.round(aiFrameHeight * stopLineRatio)} px · 0.65 = 65% chiều cao`}
                             >
-                                <option value="yolo11n.pt">yolo11n.pt — Nano (2.6M) · 30 FPS</option>
-                                <option value="yolo11s.pt">yolo11s.pt — Small (9.4M)</option>
-                                <option value="yolo11m.pt">yolo11m.pt — Medium (20M) · Cao nhất</option>
-                            </select>
-                        </FormField>
+                                <input
+                                    type="range"
+                                    min="0.30" max="0.90" step="0.01"
+                                    value={stopLineRatio}
+                                    onChange={e => setStopLineRatio(Number(e.target.value))}
+                                    disabled={!isAdmin || aiOnline === false}
+                                    style={{ width: '100%', accentColor: '#1d4ed8', opacity: isAdmin ? 1 : 0.5, cursor: isAdmin ? 'pointer' : 'not-allowed' }}
+                                />
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--t-muted)', fontFamily: 'var(--mono)' }}>
+                                    <span>0.30 (xa)</span>
+                                    <span>0.65 mặc định</span>
+                                    <span>0.90 (gần)</span>
+                                </div>
+                            </FormField>
 
-                        <FormField
-                            label="Vị Trí Trạm Giám Sát"
-                            description="Tên đường / Nút giao thông đặt camera"
-                            hint="Hiển thị trong thẻ vi phạm và báo cáo xuất"
-                        >
+                            <FormField
+                                label="Chiều Xe Đi Qua Vạch"
+                                description="Chỉ đếm xe cắt vạch theo đúng chiều này (chống đếm xe ngược chiều)"
+                                hint="up: mép xe đi từ dưới lên (Y giảm) · down: đi từ trên xuống (Y tăng)"
+                            >
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    {[
+                                        { value: 'up', label: '↑ Đi lên' },
+                                        { value: 'down', label: '↓ Đi xuống' },
+                                    ].map(opt => (
+                                        <button
+                                            key={opt.value}
+                                            type="button"
+                                            onClick={() => setApproachDirection(opt.value)}
+                                            disabled={!isAdmin || aiOnline === false}
+                                            style={{
+                                                flex: 1, padding: '8px 10px', borderRadius: '6px', fontSize: '12.5px', fontWeight: 700,
+                                                cursor: (!isAdmin || aiOnline === false) ? 'not-allowed' : 'pointer',
+                                                border: approachDirection === opt.value ? '1.5px solid #1d4ed8' : '1px solid var(--c-border)',
+                                                backgroundColor: approachDirection === opt.value ? 'rgba(29,78,216,0.12)' : 'transparent',
+                                                color: approachDirection === opt.value ? '#60a5fa' : 'var(--t-secondary)',
+                                            }}
+                                        >
+                                            {opt.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </FormField>
+                        </div>
+
+                        {/* C4: bật/tắt hiển thị vạch — chỉ đổi phần vẽ, không đổi logic vi phạm */}
+                        <label style={{
+                            display: 'flex', alignItems: 'center', gap: '9px',
+                            fontSize: '12px', color: 'var(--t-secondary)',
+                            cursor: (!isAdmin || aiOnline === false) ? 'not-allowed' : 'pointer',
+                            opacity: (!isAdmin || aiOnline === false) ? 0.55 : 1,
+                        }}>
                             <input
-                                className="input-field"
-                                type="text"
-                                value={cameraLocation}
-                                onChange={e => setCameraLocation(e.target.value)}
-                                disabled={!isAdmin}
-                                style={{ opacity: isAdmin ? 1 : 0.5 }}
+                                type="checkbox"
+                                checked={stopLineVisible}
+                                onChange={e => setStopLineVisible(e.target.checked)}
+                                disabled={!isAdmin || aiOnline === false}
+                                style={{ accentColor: '#1d4ed8', width: '15px', height: '15px' }}
                             />
-                        </FormField>
+                            <span>
+                                <strong style={{ color: 'var(--t-primary)' }}>Hiện vạch dừng trên video</strong>
+                                <span style={{ color: 'var(--t-muted)' }}> — chỉ ảnh hưởng hiển thị, AI vẫn tính vi phạm theo đúng vạch này</span>
+                            </span>
+                        </label>
+
+                        <div style={{ fontSize: '11px', color: 'var(--t-muted)' }}>
+                            Lưu ý: khi áp dụng vạch mới, AI sẽ làm mới bộ đếm của phiên (số “vi phạm phiên này” trên
+                            Live Camera trở về 0) vì trạng thái xe so với vạch cũ không còn đúng. Bật/tắt hiển thị vạch
+                            thì không làm mất bộ đếm.
+                        </div>
+
+                        {aiMessage && (
+                            <div style={{
+                                display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px',
+                                padding: '9px 12px', borderRadius: '8px',
+                                backgroundColor: aiMessage.type === 'ok' ? 'rgba(34,197,94,0.10)' : 'rgba(239,68,68,0.10)',
+                                border: `1px solid ${aiMessage.type === 'ok' ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                                color: aiMessage.type === 'ok' ? '#4ade80' : '#f87171',
+                            }}>
+                                <span>{aiMessage.type === 'ok' ? '✓' : '✕'}</span>
+                                <span>{aiMessage.text}</span>
+                            </div>
+                        )}
+
+                        {isAdmin && (
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={handleResetAiConfig}
+                                    disabled={aiSaving || aiOnline === false}
+                                >
+                                    Khôi Phục Mặc Định ({aiDefaults.stopLineRatio.toFixed(2)})
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    onClick={handleApplyAiConfig}
+                                    disabled={aiSaving || aiOnline === false}
+                                >
+                                    {aiSaving ? <><div className="spinner" /><span>Đang áp dụng...</span></> : 'Áp Dụng Cho AI'}
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </Section>
 
-                {/* Save row */}
-                {isAdmin && (
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '14px' }}>
-                        {saveResult === 'ok' && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#86efac', fontSize: '12.5px' }}>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                                Đã lưu cấu hình vào MySQL thành công
-                            </div>
-                        )}
-                        {saveResult === 'error' && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#fca5a5', fontSize: '12.5px' }}>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
-                                Lỗi lưu cấu hình — backend chưa kết nối
-                            </div>
-                        )}
-                        <button type="submit" className="btn btn-primary" disabled={saving}>
-                            {saving ? <><div className="spinner" /><span>Đang lưu...</span></> : 'Lưu Cấu Hình'}
-                        </button>
-                    </div>
-                )}
-            </form>
+            </div>
 
             {/* System info section */}
             <Section title="Thông Tin Hệ Thống" icon={
@@ -231,6 +312,7 @@ function FormField({ label, description, hint, children }) {
                 {label}
             </label>
             {children}
+            {description && <div style={{ fontSize: '10.5px', color: 'var(--t-muted)' }}>{description}</div>}
             {hint && <div style={{ fontSize: '10.5px', color: 'var(--t-muted)', fontFamily: 'var(--mono)' }}>{hint}</div>}
         </div>
     );

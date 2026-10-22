@@ -11,7 +11,29 @@ export default function ViolationModal({ violation, onClose, onConfirm, onDismis
     const [rotation, setRotation] = useState(0);
     const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
     const [isDragging, setIsDragging] = useState(false);
+    const [pdfExporting, setPdfExporting] = useState(false);
     const dragStartRef = useRef({ x: 0, y: 0 });
+
+    // Keyboard shortcuts for Lightbox (ESC to close, + / - to zoom)
+    // Phải đặt TRƯỚC early-return bên dưới để không vi phạm rules-of-hooks.
+    useEffect(() => {
+        function handleKeyDown(e) {
+            if (e.key === 'Escape') {
+                if (isLightboxOpen) {
+                    closeLightbox();
+                } else {
+                    onClose();
+                }
+            }
+            if (isLightboxOpen) {
+                if (e.key === '+' || e.key === '=') handleZoomIn();
+                if (e.key === '-') handleZoomOut();
+                if (e.key === '0') handleResetZoom();
+            }
+        }
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [isLightboxOpen, onClose]);
 
     if (!violation) return null;
 
@@ -122,8 +144,38 @@ export default function ViolationModal({ violation, onClose, onConfirm, onDismis
         }
     }
 
-    async function handleConfirm() {
-        if (submitting) return;
+    // C3: Tải biên bản PDF do backend sinh (có ảnh bằng chứng + mức phạt + căn cứ pháp lý)
+    async function handleExportPdf() {
+        if (pdfExporting) return;
+        setPdfExporting(true);
+        setToast(null);
+        try {
+            const res = await fetch(violationAPI.pdfUrl(violation.id));
+            const contentType = res.headers.get('content-type') || '';
+            if (!res.ok || !contentType.includes('pdf')) {
+                const detail = await res.text().catch(() => '');
+                throw new Error(detail || `HTTP ${res.status}`);
+            }
+            const blob = await res.blob();
+            const blobUrl = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.style.display = 'none';
+            link.href = blobUrl;
+            link.download = `Bien_ban_vi_pham_${violation.id}.pdf`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(blobUrl);
+            setToast({ message: 'Đã xuất biên bản PDF thành công!', type: 'success' });
+        } catch (err) {
+            console.error('Lỗi xuất PDF:', err);
+            setToast({ message: 'Không xuất được biên bản PDF. Kiểm tra backend đang chạy rồi thử lại.', type: 'error' });
+        } finally {
+            setPdfExporting(false);
+        }
+    }
+
+    async function handleConfirm() {        if (submitting) return;
         setSubmitting(true);
         setToast(null);
         try {
@@ -194,26 +246,6 @@ export default function ViolationModal({ violation, onClose, onConfirm, onDismis
     function handleMouseUp() {
         setIsDragging(false);
     }
-
-    // Keyboard shortcuts for Lightbox (ESC to close, + / - to zoom)
-    useEffect(() => {
-        function handleKeyDown(e) {
-            if (e.key === 'Escape') {
-                if (isLightboxOpen) {
-                    closeLightbox();
-                } else {
-                    onClose();
-                }
-            }
-            if (isLightboxOpen) {
-                if (e.key === '+' || e.key === '=') handleZoomIn();
-                if (e.key === '-') handleZoomOut();
-                if (e.key === '0') handleResetZoom();
-            }
-        }
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isLightboxOpen, onClose]);
 
     return (
         <>
@@ -465,7 +497,23 @@ export default function ViolationModal({ violation, onClose, onConfirm, onDismis
                     )}
 
                     {/* Nút hành động */}
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
+                        <button
+                            onClick={handleExportPdf}
+                            disabled={pdfExporting}
+                            title="Xuất biên bản xử phạt dạng PDF (có ảnh bằng chứng và căn cứ pháp lý)"
+                            style={{
+                                padding: '9px 16px', borderRadius: '6px',
+                                border: '1.5px solid #1d4ed8', backgroundColor: '#eff6ff',
+                                color: '#1d4ed8', fontWeight: 700, fontSize: '13px',
+                                cursor: pdfExporting ? 'wait' : 'pointer',
+                                opacity: pdfExporting ? 0.7 : 1,
+                                display: 'flex', alignItems: 'center', gap: '6px',
+                                marginRight: 'auto',
+                            }}
+                        >
+                            {pdfExporting ? '⏳ Đang xuất...' : '📄 Xuất Biên Bản PDF'}
+                        </button>
                         <button
                             onClick={onClose}
                             disabled={submitting}

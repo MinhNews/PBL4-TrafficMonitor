@@ -7,7 +7,7 @@ import HourlyChart from '../components/dashboard/HourlyChart';
 export default function Dashboard({ onOpenModal, onViolationCountChange }) {
     const [violations, setViolations] = useState([]);
     const [hourlyData, setHourlyData] = useState(
-        Array.from({ length: 24 }, (_, i) => ({ label: `${i}h`, count: 0 }))
+        Array.from({ length: 24 }, (_, i) => ({ label: `${i}h`, count: 0, vehicleCount: 0, motorcycleCount: 0, carCount: 0 }))
     );
     const [stats, setStats] = useState({
         totalViolations: 0,
@@ -25,8 +25,8 @@ export default function Dashboard({ onOpenModal, onViolationCountChange }) {
             ]);
             if (statsRes.status === 'fulfilled' && statsRes.value?.data) {
                 const raw = statsRes.value.data;
-                const totalV = raw.totalViolations || 0;
-                const passed = raw.vehiclesPassedToday !== undefined ? raw.vehiclesPassedToday : (totalV > 0 ? totalV * 3 + 15 : 0);
+                // Không sinh số ước lượng: hiển thị đúng số liệu backend trả về.
+                const passed = raw.vehiclesPassedToday != null ? raw.vehiclesPassedToday : 0;
                 setStats({ ...raw, vehiclesPassedToday: passed });
             }
             if (violationsRes.status === 'fulfilled' && violationsRes.value?.data?.content) {
@@ -60,7 +60,8 @@ export default function Dashboard({ onOpenModal, onViolationCountChange }) {
                 totalViolations: (prev.totalViolations || 0) + 1,
                 redLightCount: isRL ? (prev.redLightCount || 0) + 1 : prev.redLightCount,
                 noHelmetCount: isNH ? (prev.noHelmetCount || 0) + 1 : prev.noHelmetCount,
-                vehiclesPassedToday: (prev.vehiclesPassedToday || 0) + 1,
+                // Không tự tăng lưu lượng xe: AI đã đếm riêng và gửi qua /api/stats/flow,
+                // lần poll kế tiếp sẽ lấy đúng số từ backend.
             }));
             const h = new Date().getHours();
             setHourlyData(prev => prev.map((item, i) => i === h ? { ...item, count: (item.count || 0) + 1 } : item));

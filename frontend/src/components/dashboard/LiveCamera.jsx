@@ -3,6 +3,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 const STREAM_URL = 'http://localhost:5000/video_feed';
 const STATUS_URL = 'http://localhost:5000/status';
 const LIGHT_URL = 'http://localhost:5000/light';
+const CAMERAS_URL = 'http://localhost:5000/cameras';
+const SWITCH_URL = 'http://localhost:5000/camera/switch';
+const CONFIG_URL = 'http://localhost:5000/config';
 const CHECK_INTERVAL = 1000;
 
 export default function LiveCamera() {
@@ -11,6 +14,10 @@ export default function LiveCamera() {
     const [retryCount, setRetryCount] = useState(0);
     const [viewMode, setViewMode] = useState('AUTO'); // 'AUTO' | 'PORTRAIT' | 'LANDSCAPE'
     const [videoDims, setVideoDims] = useState({ width: 0, height: 0 });
+    // C4: danh sách camera + trạng thái đang chuyển + bật/tắt vạch dừng
+    const [cameras, setCameras] = useState([]);
+    const [switching, setSwitching] = useState(false);
+    const [stopLineVisible, setStopLineVisible] = useState(true);
 
     const containerRef = useRef(null);
     const imgRef = useRef(null);
@@ -25,6 +32,8 @@ export default function LiveCamera() {
             if (res.ok) {
                 const data = await res.json();
                 setMetrics(data);
+                if (typeof data.stopLineVisible === 'boolean') setStopLineVisible(data.stopLineVisible);
+                setSwitching(Boolean(data.activeCamera?.switching));
                 if (data.width && data.height) {
                     setVideoDims(prev => (prev.width === data.width && prev.height === data.height) ? prev : { width: data.width, height: data.height });
                 }
@@ -47,6 +56,18 @@ export default function LiveCamera() {
         return () => clearInterval(retryRef.current);
     }, [probe]);
 
+    // C4: danh sách camera cấu hình trong config.py (AI là nguồn chân lý)
+    useEffect(() => {
+        let alive = true;
+        fetch(CAMERAS_URL)
+            .then(r => (r.ok ? r.json() : null))
+            .then(data => {
+                if (alive && Array.isArray(data?.cameras)) setCameras(data.cameras);
+            })
+            .catch(() => {});
+        return () => { alive = false; };
+    }, []);
+
     // Lắng nghe khi ảnh từ luồng camera load để tự đo kích thước thực tế (Double Guarantee)
     const handleImageLoad = (e) => {
         const nw = e.target.naturalWidth;
@@ -56,8 +77,7 @@ export default function LiveCamera() {
         }
     };
 
-    async function toggleLight(targetLight) {
-        if (targetLight !== 'AUTO') {
+    async function toggleLight(targetLight) {        if (targetLight !== 'AUTO') {
             setMetrics(prev => ({ ...prev, light: targetLight, mode: 'MANUAL' }));
         } else {
             setMetrics(prev => ({ ...prev, mode: 'AUTO_ESP32' }));
@@ -74,6 +94,61 @@ export default function LiveCamera() {
             }
         } catch (e) {
             console.error('Error toggling light:', e);
+        }
+    }
+
+    // C4: đổi camera đang giám sát (AI áp dụng giữa 2 frame, không restart)
+    async function handleSwitchCamera(event) {
+        const id = Number(event.target.value);
+        const currentId = metrics.activeCamera?.id;
+        if (!id || id === currentId) return;
+
+        setSwitching(true);
+        try {
+            const res = await fetch(SWITCH_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cameraId: id }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+            // Chờ AI thực sự đổi (thường < 1s vì VideoCapture được mở sẵn/giữ lại)
+            for (let i = 0; i < 6; i += 1) {
+                await new Promise(r => setTimeout(r, 500));
+                const status = await fetch(STATUS_URL)
+                    .then(r => (r.ok ? r.json() : null))
+                    .catch(() => null);
+                if (status?.activeCamera?.id === id && !status?.activeCamera?.switching) {
+                    setMetrics(status);
+                    if (typeof status.stopLineVisible === 'boolean') setStopLineVisible(status.stopLineVisible);
+                    break;
+                }
+            }
+        } catch (err) {
+            console.error('Error switching camera:', err);
+        } finally {
+            setSwitching(false);
+        }
+    }
+
+    // C4: bật/tắt hiển thị vạch dừng (không ảnh hưởng logic tính vi phạm)
+    async function toggleStopLine() {
+        const next = !stopLineVisible;
+        setStopLineVisible(next);
+        try {
+            const res = await fetch(CONFIG_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stopLineVisible: next }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (typeof data.settings?.stopLineVisible === 'boolean') {
+                setStopLineVisible(data.settings.stopLineVisible);
+            }
+        } catch (err) {
+            setStopLineVisible(!next);
+            console.error('Error toggling stop line:', err);
         }
     }
 
@@ -101,6 +176,15 @@ export default function LiveCamera() {
         ? `${realW}×${realH} (${isActuallyPortrait ? 'Dọc ~9:16' : realW / realH > 1.6 ? 'Ngang 16:9' : 'Ngang 4:3'})`
         : 'Đang nhận diện...';
 
+    // C4: camera đang giám sát (AI trả về trong /status); fallback theo danh sách đã nạp
+    const activeCameraId = metrics.activeCamera?.id ?? cameras.find(c => c.active)?.id ?? null;
+    const activeCameraName = metrics.activeCamera?.name || cameras.find(c => c.active)?.name || 'Đang kết nối...';
+    const activeCameraCode = activeCameraId != null ? `CAM-${String(activeCameraId).padStart(2, '0')}` : 'CAM-??';
+
+    // Vạch dừng thật do AI vẽ = chiều cao khung × tỉ lệ đang chạy trong runtime_config (không hardcode)
+    const stopLineRatio = typeof metrics.stopLineRatio === 'number' ? metrics.stopLineRatio : 0.65;
+    const stopLineY = Math.round(realH * stopLineRatio);
+
     // Chiều rộng động của cột video khi ở chế độ Dọc (tỷ lệ chuẩn)
     const portraitColWidth = Math.min(380, Math.max(280, Math.round(560 * (realW / realH))));
 
@@ -125,25 +209,37 @@ export default function LiveCamera() {
                 flexWrap: 'wrap',
                 gap: '10px',
             }}>
-                {/* Left: Camera identification */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {/* Left: Camera identification + bộ chọn camera (C4) */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                     <span style={{
                         width: '9px', height: '9px', borderRadius: '50%',
                         backgroundColor: streamStatus === 'live' ? '#16a34a' : streamStatus === 'connecting' ? '#d97706' : '#dc2626'
                     }} />
                     <span style={{ fontSize: '13.5px', fontWeight: 800, color: 'var(--t-primary)' }}>
-                        Bàn Giám Sát Tuyến: CAM-HK-01
+                        Bàn Giám Sát Tuyến: {activeCameraCode}
                     </span>
-                    <span style={{
-                        fontSize: '11px',
-                        fontWeight: 700,
-                        backgroundColor: '#e2e8f0',
-                        color: '#334155',
-                        padding: '2px 7px',
-                        borderRadius: '4px'
-                    }}>
-                        Hòa Khánh
-                    </span>
+                    <select
+                        value={activeCameraId ?? ''}
+                        onChange={handleSwitchCamera}
+                        disabled={switching || cameras.length < 2}
+                        title="Chọn camera AI đang giám sát (không cần restart)"
+                        style={{
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            backgroundColor: '#ffffff',
+                            color: '#334155',
+                            border: '1px solid #cbd5e1',
+                            borderRadius: '4px',
+                            padding: '3px 6px',
+                            maxWidth: '230px',
+                            cursor: (switching || cameras.length < 2) ? 'not-allowed' : 'pointer',
+                        }}
+                    >
+                        {cameras.length === 0 && <option value="">{activeCameraName}</option>}
+                        {cameras.map(cam => (
+                            <option key={cam.id} value={cam.id}>{cam.name}</option>
+                        ))}
+                    </select>
                     <span style={{
                         fontSize: '11px',
                         fontWeight: 600,
@@ -243,6 +339,36 @@ export default function LiveCamera() {
                         {streamStatus === 'live' ? `TRỰC TIẾP (${metrics.fps || 30} FPS)` : 'MẤT KẾT NỐI'}
                     </div>
 
+                    {/* C4: bật/tắt vạch dừng (chỉ ảnh hưởng hiển thị) */}
+                    <button
+                        onClick={toggleStopLine}
+                        title={stopLineVisible ? 'Ẩn vạch dừng trên video (vẫn tính vi phạm bình thường)' : 'Hiện vạch dừng trên video'}
+                        style={{
+                            padding: '5px 8px',
+                            color: stopLineVisible ? '#1d4ed8' : '#94a3b8',
+                            backgroundColor: stopLineVisible ? '#eff6ff' : '#ffffff',
+                            border: stopLineVisible ? '1px solid #bfdbfe' : '1px solid var(--c-border)',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            fontSize: '11px',
+                            fontWeight: 600,
+                        }}
+                    >
+                        {stopLineVisible ? (
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                            </svg>
+                        ) : (
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19M1 1l22 22"/>
+                            </svg>
+                        )}
+                        Vạch Dừng
+                    </button>
+
                     <button
                         onClick={toggleFullscreen}
                         title="Xem toàn màn hình"
@@ -311,7 +437,8 @@ export default function LiveCamera() {
                             <OfflinePlaceholder status={streamStatus} retryCount={retryCount} />
                         )}
 
-                        <MonitorHUD streamStatus={streamStatus} code="CAM-HK-01" label={aspectRatioLabel} />
+                        <MonitorHUD streamStatus={streamStatus} code={activeCameraCode} label={aspectRatioLabel} stopLineY={stopLineY} stopLineVisible={stopLineVisible} />
+                        {switching && <SwitchingOverlay />}
                     </div>
 
                     {/* Cột Phải: Bảng Điều Hành Tín Hiệu & Đo Lường Trực Tuyến */}
@@ -325,7 +452,7 @@ export default function LiveCamera() {
                         overflowY: 'auto',
                     }}>
                         <TrafficLightControlSection metrics={metrics} toggleLight={toggleLight} />
-                        <RealtimeMetricsSection metrics={metrics} />
+                        <RealtimeMetricsSection metrics={metrics} streamStatus={streamStatus} />
                         <TechnicalSpecSection isPortrait={true} realW={realW} realH={realH} />
                     </div>
                 </div>
@@ -369,7 +496,8 @@ export default function LiveCamera() {
                             <OfflinePlaceholder status={streamStatus} retryCount={retryCount} />
                         )}
 
-                        <MonitorHUD streamStatus={streamStatus} code="CAM-HK-01" label={aspectRatioLabel} />
+                        <MonitorHUD streamStatus={streamStatus} code={activeCameraCode} label={aspectRatioLabel} stopLineY={stopLineY} stopLineVisible={stopLineVisible} />
+                        {switching && <SwitchingOverlay />}
                     </div>
 
                     {/* Bảng Điều Hành & Telemetry Trải Ngang Dưới Video */}
@@ -381,7 +509,7 @@ export default function LiveCamera() {
                         backgroundColor: '#ffffff',
                     }}>
                         <TrafficLightControlSection metrics={metrics} toggleLight={toggleLight} compact={true} />
-                        <RealtimeMetricsSection metrics={metrics} compact={true} />
+                        <RealtimeMetricsSection metrics={metrics} compact={true} streamStatus={streamStatus} />
                         <TechnicalSpecSection isPortrait={false} realW={realW} realH={realH} />
                     </div>
                 </div>
@@ -439,7 +567,7 @@ function OfflinePlaceholder({ status, retryCount }) {
     );
 }
 
-function MonitorHUD({ streamStatus, code, label }) {
+function MonitorHUD({ streamStatus, code, stopLineY, stopLineVisible }) {
     if (streamStatus !== 'live') return null;
     return (
         <>
@@ -462,21 +590,46 @@ function MonitorHUD({ streamStatus, code, label }) {
                 <span>{code} · LIVE</span>
             </div>
 
-            <div style={{
-                position: 'absolute',
-                bottom: 10, left: 10,
-                backgroundColor: 'rgba(15, 23, 42, 0.85)',
-                padding: '3px 8px',
-                borderRadius: '4px',
-                fontSize: '10px',
-                color: '#cbd5e1',
-                fontFamily: 'var(--mono)',
-                border: '1px solid rgba(255, 255, 255, 0.1)',
-                zIndex: 2,
-            }}>
-                VẠCH DỪNG: Y=468
-            </div>
+            {stopLineVisible && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: 10, left: 10,
+                    backgroundColor: 'rgba(15, 23, 42, 0.85)',
+                    padding: '3px 8px',
+                    borderRadius: '4px',
+                    fontSize: '10px',
+                    color: '#cbd5e1',
+                    fontFamily: 'var(--mono)',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    zIndex: 2,
+                }}>
+                    VẠCH DỪNG: Y={stopLineY}
+                </div>
+            )}
         </>
+    );
+}
+
+function SwitchingOverlay() {
+    return (
+        <div style={{
+            position: 'absolute',
+            inset: 0,
+            backgroundColor: 'rgba(9, 13, 22, 0.72)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '10px',
+            zIndex: 3,
+            color: '#f8fafc',
+        }}>
+            <div className="spinner" />
+            <div style={{ fontSize: '12.5px', fontWeight: 700 }}>Đang chuyển camera...</div>
+            <div style={{ fontSize: '11px', color: '#94a3b8' }}>
+                AI đổi nguồn video giữa hai frame — không cần restart
+            </div>
+        </div>
     );
 }
 
@@ -701,7 +854,7 @@ function TrafficLightControlSection({ metrics, toggleLight, compact = false }) {
     );
 }
 
-function RealtimeMetricsSection({ metrics, compact = false }) {
+function RealtimeMetricsSection({ metrics, compact = false, streamStatus }) {
     return (
         <div>
             <div style={{ fontSize: '11.5px', fontWeight: 800, color: 'var(--t-primary)', textTransform: 'uppercase', letterSpacing: '0.4px', marginBottom: '8px' }}>
@@ -729,11 +882,11 @@ function RealtimeMetricsSection({ metrics, compact = false }) {
                     borderRadius: '6px',
                     borderLeft: '3px solid #dc2626'
                 }}>
-                    <div style={{ fontSize: '10.5px', color: '#64748b', fontWeight: 600 }}>VI PHẠM TẠI CHỐT</div>
+                    <div style={{ fontSize: '10.5px', color: '#64748b', fontWeight: 600 }}>VI PHẠM PHIÊN NÀY (AI)</div>
                     <div style={{ fontSize: '20px', fontWeight: 800, color: '#dc2626', margin: '2px 0' }}>
                         {metrics.violations != null ? metrics.violations.toLocaleString() : '0'} <span style={{ fontSize: '11px', fontWeight: 500, color: '#64748b' }}>vụ</span>
                     </div>
-                    <div style={{ fontSize: '10px', color: '#dc2626', fontWeight: 600 }}>● Đã lập hồ sơ</div>
+                    <div style={{ fontSize: '10px', color: '#dc2626', fontWeight: 600 }}>● Bộ đếm AI · reset khi loop/đổi camera</div>
                 </div>
 
                 <div style={{
@@ -747,7 +900,7 @@ function RealtimeMetricsSection({ metrics, compact = false }) {
                     <div style={{ fontSize: '20px', fontWeight: 800, color: '#16a34a', margin: '2px 0' }}>
                         {metrics.fps || 30} <span style={{ fontSize: '11px', fontWeight: 500, color: '#64748b' }}>FPS</span>
                     </div>
-                    <div style={{ fontSize: '10px', color: '#64748b' }}>YOLO11n + ByteTrack</div>
+                    <div style={{ fontSize: '10px', color: '#64748b' }}>YOLO11s + ByteTrack</div>
                 </div>
 
                 <div style={{
@@ -757,9 +910,9 @@ function RealtimeMetricsSection({ metrics, compact = false }) {
                     borderRadius: '6px',
                     borderLeft: '3px solid #64748b'
                 }}>
-                    <div style={{ fontSize: '10.5px', color: '#64748b', fontWeight: 600 }}>ĐỘ TRỄ MẠNG</div>
-                    <div style={{ fontSize: '20px', fontWeight: 800, color: '#334155', margin: '2px 0' }}>
-                        &lt; 40 <span style={{ fontSize: '11px', fontWeight: 500, color: '#64748b' }}>ms</span>
+                    <div style={{ fontSize: '10.5px', color: '#64748b', fontWeight: 600 }}>KẾT NỐI STREAM</div>
+                    <div style={{ fontSize: '20px', fontWeight: 800, color: streamStatus === 'live' ? '#16a34a' : '#dc2626', margin: '2px 0' }}>
+                        {streamStatus === 'live' ? 'ONLINE' : 'OFFLINE'}
                     </div>
                     <div style={{ fontSize: '10px', color: '#64748b' }}>Cổng MJPEG :5000</div>
                 </div>
