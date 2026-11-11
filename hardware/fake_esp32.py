@@ -1,10 +1,3 @@
-"""
-==============================================================================
- ĐỒ ÁN PBL4 - HỆ THỐNG GIÁM SÁT GIAO THÔNG THÔNG MINH (NHÓM 3)
- SCRIPT GIẢ LẬP ESP32 CHẠY TRÊN MÁY TÍNH (KÈM TIẾNG BÍP CÒI HÚ WINDOWS)
- Chạy: python hardware/fake_esp32.py
-==============================================================================
-"""
 import paho.mqtt.client as mqtt
 import time
 import json
@@ -32,21 +25,21 @@ def play_buzzer():
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
-        print(f"\n✅ [FAKE ESP32] Đã kết nối thành công tới Mosquitto Broker ({BROKER}:1883)!")
+        print(f"\n [FAKE ESP32] Đã kết nối thành công tới Mosquitto Broker ({BROKER}:1883)!")
         client.subscribe(TOPIC_ALERT)
         client.subscribe("traffic/alert")
-        print(f"👂 Đang lắng nghe kênh cảnh báo còi hú: {TOPIC_ALERT}")
-        print("🚦 Bắt đầu tự động phát chu kỳ đèn giao thông (Đỏ 15s -> Xanh 15s -> Vàng 3s)...\n")
+        print(f" Đang lắng nghe kênh cảnh báo còi hú: {TOPIC_ALERT}")
+        print(" Bắt đầu tự động phát chu kỳ đèn giao thông (Đỏ 15s -> Xanh 15s -> Vàng 3s)...\n")
     else:
-        print(f"❌ Kết nối thất bại, mã lỗi: {rc}")
+        print(f" Kết nối thất bại, mã lỗi: {rc}")
 
 def on_message(client, userdata, msg):
     content = msg.payload.decode('utf-8', errors='ignore')
     print("\n" + "!" * 65)
-    print(f"🚨 [CÒI HÚ HIỆN TRƯỜNG] Nhận lệnh từ: {msg.topic}")
-    print(f"📋 Nội dung cảnh báo: {content}")
-    print(">>> 🔊 CÒI ACTIVE BUZZER ĐANG HÚ VANG: BÍP... BÍP... BÍP... <<<")
-    print(">>> 🔴 ĐÈN ĐỎ CHỚP NHÁY LIÊN TỤC TẠI NGÃ TƯ <<<")
+    print(f" [CÒI HÚ HIỆN TRƯỜNG] Nhận lệnh từ: {msg.topic}")
+    print(f" Nội dung cảnh báo: {content}")
+    print(">>>  CÒI ACTIVE BUZZER ĐANG HÚ VANG: BÍP... BÍP... BÍP... <<<")
+    print(">>>  ĐÈN ĐỎ CHỚP NHÁY LIÊN TỤC TẠI NGÃ TƯ <<<")
     print("!" * 65 + "\n")
     
     # Kêu bíp trên loa máy tính
@@ -73,9 +66,9 @@ def light_cycle_publisher(client):
 
 def main():
     print("=" * 65)
-    print("🚦 ESP32 SIMULATOR - TRAFFIC LIGHT & BUZZER ALARM (PBL4) 🚦")
+    print(" ESP32 SIMULATOR - TRAFFIC LIGHT & BUZZER ALARM (PBL4) 🚦")
     print("=" * 65)
-    print(f"🌐 Đang kết nối tới Cloud Broker: {BROKER}:{PORT} ...")
+    print(f" Đang kết nối tới Cloud Broker: {BROKER}:{PORT} ...")
 
     client = mqtt.Client(client_id="PBL4_Fake_ESP32_Simulator")
     client.on_connect = on_connect
@@ -84,7 +77,7 @@ def main():
     try:
         client.connect(BROKER, PORT, 60)
     except Exception as e:
-        print(f"⚠️ Không thể kết nối tới {BROKER}: {e}. Đang thử kết nối localhost...")
+        print(f" Không thể kết nối tới {BROKER}: {e}. Đang thử kết nối localhost...")
         client.connect("localhost", PORT, 60)
 
     # Chạy thread phát chu kỳ đèn
