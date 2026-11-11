@@ -1,12 +1,3 @@
-// hardware/traffic_light/traffic_light_esp32.ino
-/*
- ==============================================================================
-  ĐỒ ÁN PBL4 - HỆ THỐNG GIÁM SÁT GIAO THÔNG THÔNG MINH (NHÓM 3 - ĐH BÁCH KHOA ĐN)
-  MÃ NGUỒN NẠP VÀO BO MẠCH THẬT ESP32 DEVKIT V1 (ARDUINO IDE)
-  Thành viên phụ trách: Phan Quang Đăng Khoa (Hardware & IoT)
- ==============================================================================
-*/
-
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <Wire.h>
@@ -14,23 +5,22 @@
 #include <Adafruit_SSD1306.h>
 #include <ArduinoJson.h>
 
-// ===== CẤU HÌNH MÀN HÌNH OLED 0.96 INCH SSD1306 (I2C) =====
+//CẤU HÌNH MÀN HÌNH OLED 0.96 INCH SSD1306 (I2C)
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// ===== ĐỊNH NGHĨA CHÂN GPIO THỰC TẾ TRÊN BO ESP32 =====
+//ĐỊNH NGHĨA CHÂN GPIO THỰC TẾ TRÊN BO ESP32
 const int PIN_RED    = 25;  // LED Đỏ ngã tư
 const int PIN_YELLOW = 26;  // LED Vàng
 const int PIN_GREEN  = 27;  // LED Xanh
 const int PIN_BUZZER = 14;  // Còi báo động Active Buzzer 5V
 
-// ===== CẤU HÌNH KẾT NỐI WIFI THẬT =====
-// 👉 KHOA ĐIỀN TÊN VÀ MẬT KHẨU WIFI CỦA BẠN VÀO ĐÂY:
+//CẤU HÌNH KẾT NỐI WIFI THẬT
 const char* WIFI_SSID = "KHOA DEN";        // Tên WiFi (hoặc Hotspot điện thoại)
 const char* WIFI_PASS = "55555555";    // Mật khẩu WiFi
 
-// ===== CẤU HÌNH MQTT BROKER =====
+//CẤU HÌNH MQTT BROKER
 // Dùng Cloud Broker để ESP32 ở bất cứ đâu có WiFi đều nói chuyện được với Backend:
 const char* MQTT_SERVER = "test.mosquitto.org";
 const int   MQTT_PORT   = 1883;
@@ -43,10 +33,10 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 
 unsigned long lastTick = 0;
-int lightPhase = 0;   // 0: ĐỎ, 1: XANH, 2: VÀNG
-int secondsLeft = 15; // Đỏ 15s -> Xanh 15s -> Vàng 3s
+int lightPhase = 0; 
+int secondsLeft = 15;
 
-// ===== HÀM CẬP NHẬT GIAO DIỆN MÀN HÌNH OLED SSD1306 =====
+//HÀM CẬP NHẬT GIAO DIỆN MÀN HÌNH OLED SSD1306
 void updateOLED(const char* state, int remaining, bool isAlert = false) {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
@@ -81,16 +71,16 @@ void updateOLED(const char* state, int remaining, bool isAlert = false) {
     display.display();
 }
 
-// ===== HÀM KÍCH HOẠT CÒI HÚ THẬT & ĐÈN ĐỎ CHỚP NHÁY LIÊN TỤC =====
+//HÀM KÍCH HOẠT CÒI HÚ THẬT & ĐÈN ĐỎ CHỚP NHÁY LIÊN TỤC
 void triggerHardwareAlarm() {
-    Serial.println("\n🚨 [HARDWARE] NHẬN LỆNH CẢNH BÁO TỪ BACKEND!");
+    Serial.println("\ [HARDWARE] NHẬN LỆNH CẢNH BÁO TỪ BACKEND!");
     Serial.println(">>> CÒI ACTIVE BUZZER ĐANG HÚ VANG TẠI PHÒNG! <<<");
     updateOLED("ALERT", 0, true);
     
     // Còi kêu 4 tiếng BÍP BÍP dồn dập kèm đèn đỏ chớp tắt
     for (int i = 0; i < 4; i++) {
-        digitalWrite(PIN_BUZZER, HIGH); // Còi kêu thật sự!
-        digitalWrite(PIN_RED, HIGH);    // Đèn đỏ nhấp nháy!
+        digitalWrite(PIN_BUZZER, HIGH); 
+        digitalWrite(PIN_RED, HIGH);   
         delay(140);
         digitalWrite(PIN_BUZZER, LOW);
         digitalWrite(PIN_RED, LOW);
@@ -98,13 +88,13 @@ void triggerHardwareAlarm() {
     }
 }
 
-// ===== HÀM NHẬN BẢN TIN MQTT TỪ BACKEND SPRING BOOT =====
+// HÀM NHẬN BẢN TIN MQTT TỪ BACKEND SPRING BOOT
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     String message = "";
     for (int i = 0; i < length; i++) {
         message += (char)payload[i];
     }
-    Serial.print("📩 [MQTT NHẬN ĐƯỢC] Kênh: ");
+    Serial.print(" [MQTT NHẬN ĐƯỢC] Kênh: ");
     Serial.print(topic);
     Serial.print(" | Nội dung: ");
     Serial.println(message);
@@ -114,7 +104,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
 }
 
-// ===== HÀM TỰ ĐỘNG KẾT NỐI LẠI MQTT KHI RỚT MẠNG =====
+//HÀM TỰ ĐỘNG KẾT NỐI LẠI MQTT KHI RỚT MẠNG
 void reconnectMQTT() {
     while (!client.connected()) {
         Serial.print("Đang kết nối MQTT Broker (test.mosquitto.org)...");
@@ -122,7 +112,7 @@ void reconnectMQTT() {
         if (client.connect(clientId.c_str())) {
             Serial.println(" ĐÃ KẾT NỐI THÀNH CÔNG!");
             client.subscribe(TOPIC_ALERT);
-            Serial.println("👂 Đã đăng ký lắng nghe kênh còi hú: pbl4/nhom3/traffic/alert");
+            Serial.println(" Đã đăng ký lắng nghe kênh còi hú: pbl4/nhom3/traffic/alert");
         } else {
             Serial.print(" Thất bại, rc=");
             Serial.print(client.state());
@@ -148,7 +138,7 @@ void setup() {
 
     // Khởi động màn hình OLED qua giao tiếp I2C (địa chỉ 0x3C)
     if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        Serial.println("❌ Không tìm thấy màn hình OLED SSD1306! Kiểm tra lại chân SDA/SCL.");
+        Serial.println(" Không tìm thấy màn hình OLED SSD1306! Kiểm tra lại chân SDA/SCL.");
     }
     display.clearDisplay();
     display.display();
@@ -162,7 +152,7 @@ void setup() {
         delay(500);
         Serial.print(".");
     }
-    Serial.println("\n✅ WiFi đã kết nối thành công! IP của ESP32: " + WiFi.localIP().toString());
+    Serial.println("\n WiFi đã kết nối thành công! IP của ESP32: " + WiFi.localIP().toString());
 
     // Cấu hình MQTT
     client.setServer(MQTT_SERVER, MQTT_PORT);
