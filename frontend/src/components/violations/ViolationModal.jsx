@@ -150,7 +150,10 @@ export default function ViolationModal({ violation, onClose, onConfirm, onDismis
         setPdfExporting(true);
         setToast(null);
         try {
-            const res = await fetch(violationAPI.pdfUrl(violation.id));
+            const token = localStorage.getItem('jwt_token');
+            const res = await fetch(violationAPI.pdfUrl(violation.id), {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+            });
             const contentType = res.headers.get('content-type') || '';
             if (!res.ok || !contentType.includes('pdf')) {
                 const detail = await res.text().catch(() => '');

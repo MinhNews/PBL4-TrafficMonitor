@@ -20,6 +20,9 @@ class BackendService:
         self.violation_endpoint = endpoint or getattr(config, "VIOLATION_ENDPOINT", "http://localhost:8080/api/violations")
         self.flow_endpoint = "http://localhost:8080/api/stats/flow"
         self.camera_id = getattr(config, "CAMERA_ID", 1)
+        # Backend đã bật Spring Security: AI Service không có tài khoản người dùng nên
+        # xác thực bằng khoá chia sẻ X-AI-KEY (xem SecurityConfig + application.properties).
+        self.headers = {"X-AI-KEY": getattr(config, "AI_API_KEY", "")}
 
     def set_camera_id(self, camera_id):
         """C4: cập nhật camera đang giám sát để biên bản gắn đúng camera trong DB."""
@@ -27,7 +30,7 @@ class BackendService:
 
     def _async_post_violation(self, payload):
         try:
-            res = requests.post(self.violation_endpoint, json=payload, timeout=25)
+            res = requests.post(self.violation_endpoint, json=payload, headers=self.headers, timeout=25)
             if res.status_code in [200, 201]:
                 data = res.json()
                 # Backend chỉ trả {id, status} nên tránh in "None VNĐ" gây hiểu nhầm
@@ -43,7 +46,7 @@ class BackendService:
 
     def _async_post_flow(self, payload):
         try:
-            requests.post(self.flow_endpoint, json=payload, timeout=3)
+            requests.post(self.flow_endpoint, json=payload, headers=self.headers, timeout=3)
         except Exception:
             pass
 

@@ -1,6 +1,9 @@
 # ===== BACKEND =====
 BACKEND_URL = "http://localhost:8080"
 VIOLATION_ENDPOINT = f"{BACKEND_URL}/api/violations"
+# Khoá chia sẻ để AI Service gọi API ghi dữ liệu khi Backend đã bật Spring Security
+# (phải trùng app.ai.api-key trong backend/src/main/resources/application.properties)
+AI_API_KEY = "pbl4-nhom3-ai-service-2026"
 
 # ===== DANH SÁCH CAMERA (C4) =====
 # AI chỉ chạy MỘT camera tại một thời điểm; Web đổi camera không cần restart.
