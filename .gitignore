@@ -34,3 +34,7 @@ ai-service/tools/*.jpg
 *.png
 !frontend/src/assets/*
 !docs/**
+
+# File huong dan cho AI agent (chi dung local, khong dua len GitHub)
+AGENTS.md
+CLAUDE.md
