@@ -1,7 +1,9 @@
 import time
 import collections
+import math
 import numpy as np
 import supervision as sv
+import config
 from core.entity import TrafficEntity
 
 class TrafficTrackerManager:
@@ -11,31 +13,226 @@ class TrafficTrackerManager:
     - Quản lý vòng đời của các thực thể TrafficEntity
     - Thuật toán ghép nối Rider với cơ chế Hysteresis Deque(maxlen=10) (B2)
     - Phân định rõ 3 vai trò: vehicle, rider, pedestrian (A3)
+    - Stable-ID: nếu ByteTrack cấp ID mới sau occlusion, thử gán lại ID cũ
+      dựa trên class + vị trí dự đoán + thời gian (không cần model ReID nặng).
     - Tự động dọn dẹp bộ nhớ và hỗ trợ làm mới khi video tua lại (loop)
     """
-    def __init__(self, track_activation_thresh=0.25, lost_buffer=30, frame_rate=30):
+    def __init__(self, track_activation_thresh=0.25, lost_buffer=None, frame_rate=30,
+                 match_threshold=None, enable_reid=None,
+                 reid_ttl_frames=None, reid_min_score=None, entity_ttl=None,
+                 reid_gate=None):
+        self.track_activation_thresh = track_activation_thresh
+        self.lost_buffer = (lost_buffer if lost_buffer is not None
+                            else getattr(config, "TRACK_LOST_BUFFER", 30))
+        self.frame_rate = frame_rate
+        self.match_threshold = (match_threshold if match_threshold is not None
+                                else getattr(config, "TRACK_MATCH_THRESHOLD", 0.8))
+        self.enable_reid = (enable_reid if enable_reid is not None
+                            else getattr(config, "TRACK_REID_ENABLED", True))
+        # TTL tính theo SỐ FRAME đã xử lý (không phải giây) để kết quả không phụ thuộc
+        # tốc độ máy: 45 frame ~ 1.5s video 30fps.
+        self.reid_ttl_frames = (reid_ttl_frames if reid_ttl_frames is not None
+                                else getattr(config, "TRACK_REID_TTL_FRAMES", 45))
+        self.reid_min_score = (reid_min_score if reid_min_score is not None
+                               else getattr(config, "TRACK_REID_MIN_SCORE", 0.20))
+        self.entity_ttl = (entity_ttl if entity_ttl is not None
+                           else getattr(config, "TRACK_ENTITY_TTL_SEC", 15.0))
+        # Bán kính cổng tìm kiếm, tính theo lần đường chéo box cuối (2.0 = vừa phải).
+        self.reid_gate = (reid_gate if reid_gate is not None
+                          else getattr(config, "TRACK_REID_GATE", 2.0))
+
+        self._init_tracker()
+        self.entities = {} # {stable_id: TrafficEntity}
+        self.riders_map = {} # {person_stable_id: moto_stable_id}
+        self.rider_history = {} # {person_stable_id: deque(maxlen=10)} - B2: Hysteresis
+        self.id_map = {} # {raw_byte_track_id: stable_id}
+        self.track_memory = {} # {stable_id: last box/velocity/time} - phục vụ re-ID
+        self.frame_count = 0
+
+    def _init_tracker(self):
         self.tracker = sv.ByteTrack(
-            track_activation_threshold=track_activation_thresh,
-            lost_track_buffer=lost_buffer,
-            minimum_matching_threshold=0.8,
-            frame_rate=frame_rate
+            track_activation_threshold=self.track_activation_thresh,
+            lost_track_buffer=self.lost_buffer,
+            minimum_matching_threshold=self.match_threshold,
+            frame_rate=self.frame_rate
         )
-        self.entities = {} # {tracker_id: TrafficEntity}
-        self.riders_map = {} # {person_tr_id: moto_tr_id}
-        self.rider_history = {} # {person_tr_id: deque(maxlen=10)} - B2: Hysteresis
 
     def reset(self):
         """Khởi tạo lại toàn bộ bộ nhớ khi video loop hoặc đổi nguồn camera"""
-        self.tracker = sv.ByteTrack(
-            track_activation_threshold=0.25,
-            lost_track_buffer=30,
-            minimum_matching_threshold=0.8,
-            frame_rate=30
-        )
+        self._init_tracker()
         self.entities.clear()
         self.riders_map.clear()
         self.rider_history.clear()
+        self.id_map.clear()
+        self.track_memory.clear()
+        self.frame_count = 0
         print("🔄 [TRACKER] Đã làm mới toàn bộ bộ nhớ theo dõi đối tượng cho chu kỳ mới.")
+
+    @staticmethod
+    def _box_iou(box_a, box_b):
+        xa = max(box_a[0], box_b[0])
+        ya = max(box_a[1], box_b[1])
+        xb = min(box_a[2], box_b[2])
+        yb = min(box_a[3], box_b[3])
+        inter = max(0.0, xb - xa) * max(0.0, yb - ya)
+        area_a = max(1.0, (box_a[2] - box_a[0]) * (box_a[3] - box_a[1]))
+        area_b = max(1.0, (box_b[2] - box_b[0]) * (box_b[3] - box_b[1]))
+        return inter / max(1.0, area_a + area_b - inter)
+
+    @staticmethod
+    def _box_center(box):
+        return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+
+    @staticmethod
+    def _box_diag(box):
+        return math.hypot(box[2] - box[0], box[3] - box[1])
+
+    def _reid_score(self, mem, box, cls_name):
+        """
+        Điểm khớp giữa track đã mất và detection mới.
+        Chỉ xét cùng class; dùng IoU với box cuối + khoảng cách tới vị trí dự đoán.
+        """
+        if mem.get("cls") != cls_name:
+            return None
+        age_frames = self.frame_count - mem.get("frame", self.frame_count)
+        if age_frames > self.reid_ttl_frames:
+            return None
+
+        cx, cy = self._box_center(box)
+        dt = min(60, max(1, age_frames))
+        vx, vy = mem.get("velocity", (0.0, 0.0))
+        pred_cx = mem["center"][0] + vx * dt
+        pred_cy = mem["center"][1] + vy * dt
+        dist = math.hypot(cx - pred_cx, cy - pred_cy)
+        diag = max(self._box_diag(mem["box"]), self._box_diag(box), 1.0)
+        gate = max(1.0, self.reid_gate) * diag
+        dist_score = max(0.0, 1.0 - dist / gate)
+        iou_score = self._box_iou(mem["box"], box)
+
+        # Ngoài cổng tìm kiếm coi như không phải cùng một đối tượng.
+        if dist > gate:
+            return None
+        return 0.6 * iou_score + 0.4 * dist_score
+
+    def _apply_stable_ids(self, tracked_list):
+        """
+        Ánh xạ ID thô của ByteTrack -> stable ID.
+        - ID đã biết: dùng lại stable ID.
+        - ID mới: thử ghép với track vừa mất (cùng class, gần vị trí dự đoán, còn TTL).
+        - Không ghép được: dùng chính ID thô làm stable ID.
+        """
+        if not tracked_list:
+            return tracked_list
+
+        active_stable = set()
+        unmatched = []
+
+        for t in tracked_list:
+            raw_id = int(t["tracker_id"])
+            t["raw_tracker_id"] = raw_id
+            if raw_id in self.id_map:
+                t["tracker_id"] = self.id_map[raw_id]
+                active_stable.add(t["tracker_id"])
+            else:
+                unmatched.append(t)
+
+        if not unmatched:
+            return self._dedup_stable_ids(tracked_list)
+
+        if not self.enable_reid:
+            for t in unmatched:
+                raw_id = t["raw_tracker_id"]
+                self.id_map[raw_id] = raw_id
+                t["tracker_id"] = raw_id
+            return self._dedup_stable_ids(tracked_list)
+
+        # Ứng viên: track đã mất, không còn active, còn trong TTL.
+        candidates = []
+        for stable_id, mem in self.track_memory.items():
+            if stable_id in active_stable:
+                continue
+            if self.frame_count - mem.get("frame", -10**9) <= self.reid_ttl_frames:
+                candidates.append((stable_id, mem))
+
+        used = set(active_stable)
+        # Ưu tiên detection có confidence cao trước; greedy 1-1 để tránh 2 track mới
+        # cùng nhận một ID cũ.
+        for t in sorted(unmatched, key=lambda x: -float(x.get("score", 0.0))):
+            raw_id = t["raw_tracker_id"]
+            best_id, best_score, best_mem = None, -1.0, None
+            for stable_id, mem in candidates:
+                if stable_id in used:
+                    continue
+                score = self._reid_score(mem, t["box"], t["class_name"])
+                if score is not None and score > best_score:
+                    best_id, best_score, best_mem = stable_id, score, mem
+
+            if best_id is not None and best_score >= self.reid_min_score:
+                # Nếu raw cũ của stable ID này còn sống, cắt liên kết để tránh
+                # hai raw track cùng trỏ về một stable ID trong các frame sau.
+                old_raw = best_mem.get("raw") if best_mem else None
+                if old_raw is not None and old_raw != raw_id:
+                    self.id_map.pop(old_raw, None)
+                self.id_map[raw_id] = best_id
+                t["tracker_id"] = best_id
+                t["reidentified"] = True
+                used.add(best_id)
+            else:
+                self.id_map[raw_id] = raw_id
+                t["tracker_id"] = raw_id
+                used.add(raw_id)
+
+        return self._dedup_stable_ids(tracked_list)
+
+    def _dedup_stable_ids(self, tracked_list):
+        """
+        Lưới an toàn: mỗi stable ID chỉ được xuất hiện một lần trong một frame.
+        Nếu trùng, giữ detection có confidence cao nhất và trả detection còn lại
+        về ID thô của nó.
+        """
+        by_stable = {}
+        for t in tracked_list:
+            by_stable.setdefault(t["tracker_id"], []).append(t)
+        for stable_id, group in by_stable.items():
+            if len(group) <= 1:
+                continue
+            group.sort(key=lambda x: -float(x.get("score", 0.0)))
+            for t in group[1:]:
+                raw_id = t["raw_tracker_id"]
+                self.id_map[raw_id] = raw_id
+                t["tracker_id"] = raw_id
+                t.pop("reidentified", None)
+        return tracked_list
+
+    def _remember_track(self, tracked, now):
+        """Lưu box/vận tốc/thời điểm cuối của stable ID để phục vụ re-ID."""
+        stable_id = tracked["tracker_id"]
+        box = tracked["box"]
+        cx, cy = self._box_center(box)
+        mem = self.track_memory.get(stable_id)
+        if mem is None:
+            self.track_memory[stable_id] = {
+                "box": list(box),
+                "cls": tracked["class_name"],
+                "center": (cx, cy),
+                "velocity": (0.0, 0.0),
+                "ts": now,
+                "frame": self.frame_count,
+                "raw": tracked.get("raw_tracker_id", stable_id),
+            }
+            return
+
+        dt = max(1, self.frame_count - mem.get("frame", self.frame_count))
+        vx = (cx - mem["center"][0]) / dt
+        vy = (cy - mem["center"][1]) / dt
+        old_vx, old_vy = mem.get("velocity", (0.0, 0.0))
+        mem["velocity"] = (0.7 * old_vx + 0.3 * vx, 0.7 * old_vy + 0.3 * vy)
+        mem["box"] = list(box)
+        mem["cls"] = tracked["class_name"]
+        mem["center"] = (cx, cy)
+        mem["ts"] = now
+        mem["frame"] = self.frame_count
+        mem["raw"] = tracked.get("raw_tracker_id", stable_id)
 
     def find_riders(self, raw_tracked_objects, is_standalone=False):
         """
@@ -88,6 +285,9 @@ class TrafficTrackerManager:
         Cập nhật ByteTrack với các phát hiện từ YOLO, đồng bộ danh sách TrafficEntity.
         Trả về: Danh sách các thực thể TrafficEntity đang hoạt động trong frame hiện tại.
         """
+        self.frame_count += 1
+        now = time.time()
+
         # 1. Chuyển đổi dữ liệu sang supervision.Detections
         if not detections_list:
             empty_det = sv.Detections.empty()
@@ -122,7 +322,8 @@ class TrafficTrackerManager:
                         "score": round(float(conf), 4)
                     })
 
-        # 2. Chạy thuật toán ghép nối Rider
+        # 2. Ánh xạ ID thô -> stable ID (re-ID sau occlusion) rồi mới ghép rider
+        tracked_list = self._apply_stable_ids(tracked_list)
         self.riders_map = self.find_riders(tracked_list, is_standalone=is_standalone)
 
         # 3. Đồng bộ hóa với danh sách TrafficEntity
@@ -134,6 +335,7 @@ class TrafficTrackerManager:
             box = t["box"]
             raw_cls = t["class_name"]
             conf = t["score"]
+            was_reidentified = bool(t.get("reidentified", False))
             active_ids.add(tr_id)
 
             if tr_id not in self.entities:
@@ -142,6 +344,12 @@ class TrafficTrackerManager:
             else:
                 entity = self.entities[tr_id]
                 entity.update(box, raw_cls, conf, stop_line_y=stop_line_y)
+                if was_reidentified:
+                    # Vừa nối lại sau occlusion: bỏ qua kiểm tra cắt vạch trên frame đầu
+                    # để tránh tính nhầm một vi phạm dựa trên quỹ đạo bị khuyết.
+                    entity.prev_leading_edge_y = entity.leading_edge_y
+
+            self._remember_track(t, now)
 
             # Phân định vai trò (A3, B2):
             if entity.stable_class in {"car", "motorcycle", "bus", "truck"}:
@@ -168,12 +376,24 @@ class TrafficTrackerManager:
 
             active_entities.append(entity)
 
-        # 4. Dọn dẹp thực thể cũ đã biến mất quá 3.0 giây (Tránh rò rỉ bộ nhớ)
-        now = time.time()
-        stale_ids = [tid for tid, ent in self.entities.items() if tid not in active_ids and (now - ent.last_updated) > 3.0]
+        # 4. Dọn dẹp thực thể cũ đã biến mất quá entity_ttl (Tránh rò rỉ bộ nhớ).
+        # Giữ lâu hơn 3.0s để còn state cho stable-ID nối lại sau occlusion.
+        stale_ids = [
+            tid for tid, ent in self.entities.items()
+            if tid not in active_ids and (now - ent.last_updated) > self.entity_ttl
+        ]
         for tid in stale_ids:
             self.entities.pop(tid, None)
             self.rider_history.pop(tid, None)
+            self.track_memory.pop(tid, None)
+            for raw_id, stable_id in list(self.id_map.items()):
+                if stable_id == tid:
+                    self.id_map.pop(raw_id, None)
+
+        # Dọn ký ức re-ID mồ côi (không còn entity) quá TTL.
+        for stable_id, mem in list(self.track_memory.items()):
+            if stable_id not in self.entities and (now - mem.get("ts", 0.0)) > self.entity_ttl:
+                self.track_memory.pop(stable_id, None)
 
         return active_entities
 

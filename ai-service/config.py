@@ -38,6 +38,19 @@ YOLO_CONFIDENCE_THRESHOLD = 0.25
 VIT_CONFIDENCE_THRESHOLD = 0.85
 NO_HELMET_FRAMES_REQUIRED = 3
 
+# ===== TRACKER / RE-IDENTIFICATION =====
+# ByteTrack giữ nguyên buffer 30 frame; lớp stable-ID bên dưới lo các cú mất track dài hơn.
+# Ngưỡng match 0.8 = IoU >= 0.2 (0.6 là CHẶT HƠN, dễ đổi ID).
+TRACK_LOST_BUFFER = 30          # giữ nguyên mặc định (30 frame)
+TRACK_MATCH_THRESHOLD = 0.8     # giữ nguyên mặc định; tăng lên 0.9 làm ByteTrack ghép sai lớp
+# Lớp stable-ID: khi ByteTrack cấp ID mới cho xe vừa bị che, thử gán lại ID cũ
+# dựa trên class + vị trí dự đoán + thời gian. Tắt bằng TRACK_REID_ENABLED=False.
+TRACK_REID_ENABLED = True
+TRACK_REID_TTL_FRAMES = 45      # giữ ký ức tối đa 45 frame đã xử lý (~1.5s video 30fps)
+TRACK_REID_MIN_SCORE = 0.20     # điểm khớp tối thiểu (0..1); 0.35 quá chặt sau occlusion
+TRACK_REID_GATE = 2.0           # bán kính tìm kiếm theo đường chéo box cuối (2.0 = vừa phải)
+TRACK_ENTITY_TTL_SEC = 15.0     # giữ entity/state lâu hơn TTL re-ID để không mất lịch sử
+
 # ===== OBJECT DETECTOR =====
 YOLO_MODEL_NAME = "yolo11s.pt"  # Bản Small 9.4M params (bắt trọn xe máy và người lái, không bị nhận nhầm thành person)
 
